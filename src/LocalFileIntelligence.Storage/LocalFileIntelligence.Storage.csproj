@@ -3,6 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="..\LocalFileIntelligence.Application\LocalFileIntelligence.Application.csproj" />
   </ItemGroup>
 </Project>
