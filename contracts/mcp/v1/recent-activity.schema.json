@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["occurredAt", "operation", "outcome", "errorCode", "correlationId"],
+        "properties": {
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "operation": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "outcome": { "enum": ["allowed", "denied", "failed"] },
+          "errorCode": { "type": ["string", "null"], "maxLength": 64 },
+          "correlationId": { "type": "string", "format": "uuid" }
+        }
+      }
+    }
+  }
+}

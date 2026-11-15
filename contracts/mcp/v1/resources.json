@@ -1,0 +1,22 @@
+{
+  "resources": [
+    {
+      "uri": "localfile://index/status",
+      "name": "index-status",
+      "description": "Authorized client's status and declared locality, with the get_index_status result shape.",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "localfile://index/roots",
+      "name": "index-roots",
+      "description": "Approved enabled roots, with the list_index_roots result shape and includeDisabled=false.",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "localfile://index/recent-activity",
+      "name": "recent-activity",
+      "description": "At most 100 redacted events belonging to the current client; no paths, queries, or contents.",
+      "mimeType": "application/json"
+    }
+  ]
+}

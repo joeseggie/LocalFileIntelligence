@@ -1,0 +1,22 @@
+{
+  "prompts": [
+    {
+      "name": "search_my_files",
+      "description": "Guide a search within approved roots without adding scope or disclosing data automatically.",
+      "arguments": [{ "name": "query", "description": "Literal search text, 1-1024 characters.", "required": true }]
+    },
+    {
+      "name": "investigate_topic",
+      "description": "Guide evidence-backed investigation using authorized search results and relative source references.",
+      "arguments": [{ "name": "topic", "description": "Topic to investigate, 1-1024 characters.", "required": true }]
+    },
+    {
+      "name": "compare_documents",
+      "description": "Guide comparison of two authorized file IDs; unsupported or unapproved content is not read.",
+      "arguments": [
+        { "name": "firstFileId", "description": "Positive indexed file ID as a decimal string.", "required": true },
+        { "name": "secondFileId", "description": "Positive indexed file ID as a decimal string.", "required": true }
+      ]
+    }
+  ]
+}

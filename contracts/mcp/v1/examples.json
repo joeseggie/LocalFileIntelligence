@@ -1,0 +1,125 @@
+{
+  "examples": [
+    {
+      "tool": "get_index_status",
+      "arguments": {},
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "state": "idle", "filesIndexed": 2, "directoriesIndexed": 0, "pendingJobs": 0,
+          "indexRevision": 1, "processing": "local",
+          "agentLocality": { "reported": "unknown", "assurance": "client_declared" }
+        }
+      }
+    },
+    {
+      "tool": "list_index_roots",
+      "arguments": { "includeDisabled": false },
+      "structuredContent": {
+        "ok": true,
+        "data": { "roots": [{ "rootId": 1, "displayName": "Synthetic Docs", "enabled": true, "status": "ready", "contentAllowed": true }] }
+      }
+    },
+    {
+      "tool": "search_files",
+      "arguments": { "query": "notes", "rootIds": [1], "extensions": [".txt"], "limit": 25, "offset": 0 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "entries": [{
+            "fileId": 1, "rootId": 1, "relativePath": "notes.txt", "name": "notes.txt",
+            "entryType": "file", "sizeBytes": 17, "modifiedAt": "2026-01-01T00:00:00.000Z", "revision": 1
+          }],
+          "nextOffset": null, "indexRevision": 1, "partial": false, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "search_content",
+      "arguments": { "query": "local", "rootIds": [1], "limit": 25, "offset": 0 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "matches": [{ "fileId": 1, "rootId": 1, "relativePath": "notes.txt", "revision": 1, "excerpt": "hello local world", "rank": -0.5 }],
+          "nextOffset": null, "indexRevision": 1, "partial": false, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "list_directory",
+      "arguments": { "rootId": 1, "relativePath": "", "entryType": "file", "limit": 25, "offset": 0 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "rootId": 1, "relativePath": "",
+          "entries": [{ "fileId": 1, "name": "notes.txt", "relativePath": "notes.txt", "entryType": "file", "sizeBytes": 17 }],
+          "nextOffset": null, "indexRevision": 1, "partial": false, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "get_file_metadata",
+      "arguments": { "fileId": 1 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "fileId": 1, "rootId": 1, "relativePath": "notes.txt", "name": "notes.txt",
+          "extension": ".txt", "entryType": "file", "sizeBytes": 17,
+          "createdAt": "2026-01-01T00:00:00.000Z", "modifiedAt": "2026-01-01T00:00:00.000Z",
+          "lastIndexedAt": "2026-01-01T00:00:01.000Z", "sha256": null,
+          "extractionStatus": "extracted", "revision": 1, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "read_file",
+      "arguments": { "fileId": 1, "maxBytes": 65536, "expectedRevision": 1 },
+      "structuredContent": {
+        "ok": true,
+        "data": { "fileId": 1, "revision": 1, "text": "hello local world", "encoding": "utf-8", "bytesRead": 17, "untrusted": true }
+      }
+    },
+    {
+      "tool": "get_directory_tree",
+      "arguments": { "rootId": 1, "relativePath": "", "depth": 3, "entryLimit": 200 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "rootId": 1, "relativePath": "",
+          "entries": [{ "fileId": 1, "relativePath": "notes.txt", "entryType": "file", "depth": 1 }],
+          "truncated": false, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "find_duplicates",
+      "arguments": { "rootIds": [1], "minimumSize": 1, "limit": 20 },
+      "structuredContent": {
+        "ok": true,
+        "data": {
+          "groups": [{
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sizeBytes": 17,
+            "files": [
+              { "fileId": 1, "rootId": 1, "relativePath": "notes.txt", "sameFileIdentity": true },
+              { "fileId": 2, "rootId": 1, "relativePath": "copy.txt", "sameFileIdentity": false }
+            ],
+            "totalFiles": 2, "truncated": false
+          }],
+          "truncated": false, "untrusted": true
+        }
+      }
+    },
+    {
+      "tool": "read_file",
+      "arguments": { "fileId": 1, "maxBytes": 1 },
+      "structuredContent": {
+        "ok": false,
+        "error": {
+          "code": "SIZE_LIMIT_EXCEEDED", "message": "The file exceeds the requested byte limit.",
+          "retryable": false, "correlationId": "33333333-3333-4333-8333-333333333333"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,347 @@
+{
+  "phases": [
+    { "number": 0, "title": "Engineering foundation", "doneWhen": "Clean Windows build, tests, documented boundaries and working CI." },
+    { "number": 1, "title": "Persistence", "doneWhen": "Migrations, constraints, repositories and FTS5 are covered by integration tests." },
+    { "number": 2, "title": "Crawler", "doneWhen": "Recursive scans persist file/directory metadata, hash safely, respect exclusions and recover from errors." },
+    { "number": 3, "title": "Windows service", "doneWhen": "Automatic startup, least privilege, recovery and independent indexing work." },
+    { "number": 4, "title": "Incremental indexing", "doneWhen": "Creates, changes, renames and deletions converge correctly, including after downtime." },
+    { "number": 5, "title": "IPC", "doneWhen": "Authorized desktop/MCP clients communicate concurrently without direct database access." },
+    { "number": 6, "title": "Desktop", "doneWhen": "Users manage roots and monitor the service without affecting background indexing." },
+    { "number": 7, "title": "Extraction and search", "doneWhen": "Supported text/source/PDF/Office files are extracted locally and FTS returns useful excerpts." },
+    { "number": 8, "title": "MCP", "doneWhen": "Multiple independent agents query one index with the UI closed, with scoped tools/resources/prompts." },
+    { "number": 9, "title": "Release hardening", "doneWhen": "Clean installation, upgrade, recovery, backup and security acceptance pass." },
+    { "number": 10, "title": "Advanced intelligence", "doneWhen": "Local semantic search and agents work with model versions and source references." }
+  ],
+  "issues": [
+    {
+      "id": "LFI-001", "phase": 0, "title": "Create solution and projects", "dependsOn": ["LFI-004"],
+      "scope": "Create the nine specified source projects and traditional .sln with explicit inward dependencies; no runtime indexing.",
+      "acceptance": ["All projects compile on stable .NET 10.", "Core/Contracts have no adapter dependencies; Desktop/McpServer cannot reference Storage directly or transitively."]
+    },
+    {
+      "id": "LFI-002", "phase": 0, "title": "Configure central package management and build properties", "dependsOn": ["LFI-001"],
+      "scope": "Add Directory.Packages.props, SDK selection, nullable/analyzer settings, formatting and lockfiles.",
+      "acceptance": ["Package versions are central and locked restore succeeds.", "Warnings are errors; .NET 11 previews are not selected; build is deterministic."]
+    },
+    {
+      "id": "LFI-003", "phase": 0, "title": "Create test projects", "dependsOn": ["LFI-002"],
+      "scope": "Create UnitTests, IntegrationTests and AcceptanceTests using synthetic data; cover configuration, boundaries, SQL and MCP design contracts.",
+      "acceptance": ["All three suites run with dotnet test.", "Tests never index personal folders, install services, change machine ACLs or need a cloud service."]
+    },
+    {
+      "id": "LFI-004", "phase": 0, "title": "Write architecture and ADR documentation", "dependsOn": [],
+      "scope": "Capture the supplied baseline, 15 ADRs, database/MCP contracts, security model, phases and working-index acceptance criteria.",
+      "acceptance": ["Documents agree with the nine components, initial schema, nine tools/resources/prompts and deferred semantics.", "Phase 0 is clearly distinguished from an implemented working index."]
+    },
+    {
+      "id": "LFI-005", "phase": 0, "title": "Add Copilot CLI instructions", "dependsOn": ["LFI-004"],
+      "scope": "Create AGENTS.md, Copilot guidance, issue/PR templates and the incremental development guide.",
+      "acceptance": ["The workflow requires a small plan, issue-scoped changes, tests and review.", "Instructions prohibit personal-data fixtures, automatic indexing/service installation, and unapproved privacy scope expansion."]
+    },
+    {
+      "id": "LFI-006", "phase": 0, "title": "Configure CI", "dependsOn": ["LFI-002", "LFI-003", "LFI-005"],
+      "scope": "Run locked restore, build, tests, formatting and safe configuration smoke check on Windows; pin Actions.",
+      "acceptance": ["The actual GitHub Actions workflow passes on main.", "Workflow permissions are read-only and no personal data or credentials are in artifacts."]
+    },
+    {
+      "id": "LFI-010", "phase": 1, "title": "SQLite connection factory", "dependsOn": ["LFI-001", "LFI-002"],
+      "scope": "Implement Storage connection ownership with an explicitly supplied safe data directory; no crawler or UI.",
+      "acceptance": ["Every connection enables foreign keys and bounded busy timeout; WAL/durability settings are verified.", "One writer/bounded readers, cancellation, access failure and unsafe storage paths have focused tests."]
+    },
+    {
+      "id": "LFI-011", "phase": 1, "title": "Migration infrastructure", "dependsOn": ["LFI-010"],
+      "scope": "Implement immutable ordered SQL migrations, checksums, ledger transactions and pre-upgrade SQLite backups.",
+      "acceptance": ["Fresh/repeat/upgrade/rollback/crash-reopen cases pass on actual temporary databases.", "Checksum mismatch, concurrent migration and unknown newer schema fail explicitly without deleting the database."]
+    },
+    {
+      "id": "LFI-012", "phase": 1, "title": "Root persistence", "dependsOn": ["LFI-011"],
+      "scope": "Persist index_roots with stable IDs, UTC ISO 8601 times, normalized keys, consent/state and policy revisions.",
+      "acceptance": ["Insert/update/disable/remove are transactional and idempotent with uniqueness tests.", "No implicit root is added; Unicode key handling and malformed timestamp/input cases are covered."]
+    },
+    {
+      "id": "LFI-013", "phase": 1, "title": "File metadata persistence", "dependsOn": ["LFI-012"],
+      "scope": "Persist file_entries for files/directories with relative/parent paths, revisions, states and indexed lookup queries.",
+      "acceptance": ["Root/path uniqueness, stable IDs, rename/upsert, tombstones and directory queries are covered.", "Transactions invalidate stale hash/content and never cross root ownership."]
+    },
+    {
+      "id": "LFI-014", "phase": 1, "title": "Scan and job persistence", "dependsOn": ["LFI-012", "LFI-013"],
+      "scope": "Persist scan generations/progress and deduplicated, prioritized, leased index_jobs.",
+      "acceptance": ["Claims, expiry recovery, finite retries and cancellation are atomic and tested.", "Cross-root file jobs and invalid lease transitions fail; incomplete scans cannot trigger mass deletion."]
+    },
+    {
+      "id": "LFI-015", "phase": 1, "title": "FTS5 schema and tests", "dependsOn": ["LFI-013"],
+      "scope": "Add file_contents and external-content FTS5 migrations with revision/access invalidation triggers.",
+      "acceptance": ["Real MATCH results stay correct after insert/update/delete/revision/root removal.", "Use unicode61 diacritic removal; migrations include no chunks, embeddings or vectors."]
+    },
+    {
+      "id": "LFI-020", "phase": 2, "title": "Root registration and validation", "dependsOn": ["LFI-012"],
+      "scope": "Enroll explicitly selected roots using actual Windows directory handles, identity/access checks and policy revisions.",
+      "acceptance": ["Reject drive roots, traversal/device/network paths, unsupported volumes, reparse escapes and denied access.", "Configuration syntax alone cannot enroll a root; all filesystem tests use disposable synthetic trees."]
+    },
+    {
+      "id": "LFI-021", "phase": 2, "title": "Recursive enumeration", "dependsOn": ["LFI-020", "LFI-013"],
+      "scope": "Stream supported file/directory enumeration with bounded depth, memory, queues and cancellation.",
+      "acceptance": ["Empty selection does nothing; only the enrolled tree is visited.", "Depth/permission/offline/cancellation failures mark scans incomplete, never successful or deleted."]
+    },
+    {
+      "id": "LFI-022", "phase": 2, "title": "Metadata collection", "dependsOn": ["LFI-021"],
+      "scope": "Collect file/directory names, sizes, UTC filesystem times, identity and root-relative paths.",
+      "acceptance": ["Repeated scans do not duplicate entries; Unicode, long paths and disappearing files are tested.", "Directories and hard-link paths are represented correctly without expanding consent."]
+    },
+    {
+      "id": "LFI-023", "phase": 2, "title": "SHA-256 hashing", "dependsOn": ["LFI-022"],
+      "scope": "Hash authorized files incrementally with streaming SHA-256, cancellation and revision guards.",
+      "acceptance": ["Known synthetic vectors match; large files do not require whole-file buffering.", "Files changed/replaced during hashing are discarded/retried safely; stale hashes are not reported as current."]
+    },
+    {
+      "id": "LFI-024", "phase": 2, "title": "Exclusions and link handling", "dependsOn": ["LFI-020", "LFI-021"],
+      "scope": "Persist/apply normalized relative exclusions and fail-closed symlink/junction/reparse handling.",
+      "acceptance": ["Exact/recursive exclusions and separator-prefix siblings are covered.", "Junction swaps, link cycles, cloud placeholders and unsupported case-sensitive directories cannot escape or hydrate."]
+    },
+    {
+      "id": "LFI-025", "phase": 2, "title": "Scan progress persistence", "dependsOn": ["LFI-014", "LFI-022", "LFI-024"],
+      "scope": "Persist progress/counts and reconcile interrupted scans without false completion.",
+      "acceptance": ["Counts/status survive restart and redacted failures are visible.", "Only a successful complete generation can tombstone unseen entries; partial subtree failures retain safe state."]
+    },
+    {
+      "id": "LFI-030", "phase": 3, "title": "Worker Service host", "dependsOn": ["LFI-014", "LFI-023", "LFI-025"],
+      "scope": "Replace the configuration-only host with Generic Host worker composition and explicit foreground developer mode.",
+      "acceptance": ["Indexing works without UI/agents and uses one service-owned database.", "Shutdown cancellation, bounded concurrency and crash/expired-lease recovery are tested; no auto-install."]
+    },
+    {
+      "id": "LFI-031", "phase": 3, "title": "Windows Service installation and startup", "dependsOn": ["LFI-030", "LFI-034"],
+      "scope": "Add explicit secure SCM install/start/stop/uninstall procedures for supported owner accounts.",
+      "acceptance": ["An isolated Windows VM verifies automatic startup and recovery under the intended account.", "No LocalSystem fallback or passwords in config/args/logs; uninstall preserves data unless purge is explicit."]
+    },
+    {
+      "id": "LFI-032", "phase": 3, "title": "Health and lifecycle reporting", "dependsOn": ["LFI-030"],
+      "scope": "Expose service readiness, counts, scan/job state, pause and failure information through application queries.",
+      "acceptance": ["Startup/migration/indexing/degraded/shutdown states are distinguishable.", "Counters are bounded/correct and errors are explicit rather than success-shaped defaults."]
+    },
+    {
+      "id": "LFI-033", "phase": 3, "title": "Logging and diagnostics", "dependsOn": ["LFI-030"],
+      "scope": "Add bounded local structured diagnostics with stable codes, correlation and retention.",
+      "acceptance": ["Paths, document text, raw queries, credentials and protocol payloads are absent from logs.", "Rotation, repeated failure and disk-write failures are visible without unbounded log growth."]
+    },
+    {
+      "id": "LFI-034", "phase": 3, "title": "Service account and folder permission validation", "dependsOn": ["LFI-020", "LFI-030"],
+      "scope": "Validate supported account/service-logon behavior and explicit per-owner storage/root permissions.",
+      "acceptance": ["Installation checks the actual service identity, data ACLs and selected-root access.", "Unsupported/Hello-only configurations fail safely; no elevation to bypass denied file access."]
+    },
+    {
+      "id": "LFI-040", "phase": 4, "title": "FileSystemWatcher", "dependsOn": ["LFI-030", "LFI-024"],
+      "scope": "Observe only enabled selected roots with bounded watcher lifetime and overflow handling.",
+      "acceptance": ["Root disable/removal/disconnect disposes or suspends watchers correctly.", "Overflow schedules reconciliation; watchers never become the authoritative inventory."]
+    },
+    {
+      "id": "LFI-041", "phase": 4, "title": "Event normalization and debouncing", "dependsOn": ["LFI-040"],
+      "scope": "Coalesce rapid saves, duplicate/out-of-order events and rename pairs into bounded normalized work.",
+      "acceptance": ["Synthetic event bursts produce deterministic work without unbounded memory.", "Traversal/out-of-scope events are rejected and debounce cancellation is tested."]
+    },
+    {
+      "id": "LFI-042", "phase": 4, "title": "Background job processor", "dependsOn": ["LFI-014", "LFI-041"],
+      "scope": "Process durable leased jobs using backpressure and current file/root-policy checks.",
+      "acceptance": ["Concurrent claims, restarts and duplicate delivery do not corrupt or duplicate results.", "Stale/revoked work cannot commit and cancellation releases or expires leases safely."]
+    },
+    {
+      "id": "LFI-043", "phase": 4, "title": "Retry handling", "dependsOn": ["LFI-042"],
+      "scope": "Implement finite classified retries and visible terminal failure states.",
+      "acceptance": ["Transient sharing/contention failures use bounded backoff; permanent denial is not a hot loop.", "Retry schedules survive restart and honor cancellation/root disable."]
+    },
+    {
+      "id": "LFI-044", "phase": 4, "title": "Periodic reconciliation", "dependsOn": ["LFI-025", "LFI-042", "LFI-043"],
+      "scope": "Reconcile on startup, interval, reconnect and watcher overflow using complete scan generations.",
+      "acceptance": ["Missed events and service downtime converge to a fresh synthetic scan.", "Offline/inaccessible/partial trees never cause false mass deletion."]
+    },
+    {
+      "id": "LFI-045", "phase": 4, "title": "Deletion and stale-record handling", "dependsOn": ["LFI-013", "LFI-044"],
+      "scope": "Implement immediate query hiding, content invalidation, tombstones and bounded retention cleanup.",
+      "acceptance": ["Delete/rename/root removal remove FTS data and cannot return stale content.", "Restart/partial-scan cases preserve correctness and cleanup never deletes source files."]
+    },
+    {
+      "id": "LFI-050", "phase": 5, "title": "Versioned contracts", "dependsOn": ["LFI-004"],
+      "scope": "Define transport-only DTOs, query/control operations, version envelopes and stable errors in Contracts.",
+      "acceptance": ["Serialization round trips and major-version compatibility are tested.", "Contracts has no database/filesystem/UI dependency and matches the documented tool-facing use cases."]
+    },
+    {
+      "id": "LFI-051", "phase": 5, "title": "Named Pipe server", "dependsOn": ["LFI-030", "LFI-050"],
+      "scope": "Host bounded framed pipe endpoints in the service with separate query/control dispatch.",
+      "acceptance": ["Lengths are checked before allocation; malformed/oversized frames and broken pipes fail explicitly.", "Queries keep SQLite ownership in the service and do not expose unauthenticated access."]
+    },
+    {
+      "id": "LFI-052", "phase": 5, "title": "Named Pipe client", "dependsOn": ["LFI-050"],
+      "scope": "Implement a cancellable versioned IPC client in Infrastructure for desktop and MCP consumers.",
+      "acceptance": ["Connect/disconnect/reconnect/deadline behavior is bounded and tested.", "Client code cannot open Storage and never blocks the UI with synchronous waits."]
+    },
+    {
+      "id": "LFI-053", "phase": 5, "title": "Identity and ACL enforcement", "dependsOn": ["LFI-051", "LFI-052", "LFI-034"],
+      "scope": "Enforce owner/SYSTEM pipe ACLs, peer/server identity, remote rejection and capability separation.",
+      "acceptance": ["Isolated Windows identities prove cross-user/remote/spoofed-server denial.", "Query capabilities cannot execute control operations; grant revocation is checked before responses."]
+    },
+    {
+      "id": "LFI-054", "phase": 5, "title": "Protocol negotiation and timeouts", "dependsOn": ["LFI-053"],
+      "scope": "Complete major/minor negotiation, request correlation, concurrent connections, cancellation and error mapping.",
+      "acceptance": ["Version mismatch, timeout, half-closed connection and malformed JSON are covered.", "Independent clients cannot receive each other's responses and resource limits are enforced."]
+    },
+    {
+      "id": "LFI-060", "phase": 6, "title": "WinUI 3 and MVVM foundation", "dependsOn": ["LFI-002", "LFI-052"],
+      "scope": "Turn Desktop into a real WinUI 3 app with pinned Windows App SDK and CommunityToolkit.Mvvm.",
+      "acceptance": ["Windows 11 x64 launch/package smoke checks pass.", "View models use IPC; keyboard, screen-reader, high contrast and DPI basics are validated."]
+    },
+    {
+      "id": "LFI-061", "phase": 6, "title": "Dashboard", "dependsOn": ["LFI-060", "LFI-032", "LFI-054"],
+      "scope": "Display root/file/directory counts, indexing state and service health without blocking the UI.",
+      "acceptance": ["Counts and progress update from IPC and missing/degraded service states are explicit.", "UI closure does not stop service indexing; view-model failure/cancellation tests pass."]
+    },
+    {
+      "id": "LFI-062", "phase": 6, "title": "Root management", "dependsOn": ["LFI-060", "LFI-020", "LFI-054"],
+      "scope": "Add explicit select/validate/enable/disable/remove/reindex workflows with scope and purge explanations.",
+      "acceptance": ["No root is preselected; consent shows exact scope and unsupported roots fail visibly.", "Removal/disable cancels work and gates queries; purging explains physical-erasure limits."]
+    },
+    {
+      "id": "LFI-063", "phase": 6, "title": "Directory explorer", "dependsOn": ["LFI-060", "LFI-013", "LFI-054"],
+      "scope": "Display paged indexed children/trees and metadata through IPC, not direct enumeration.",
+      "acceptance": ["Large/empty/deleted/offline directories have bounded responsive states.", "Relative path traversal and stale paging are handled explicitly."]
+    },
+    {
+      "id": "LFI-064", "phase": 6, "title": "Activity and error views", "dependsOn": ["LFI-060", "LFI-033", "LFI-054"],
+      "scope": "Show redacted scan/job activity, failures and retry state with actionable controls.",
+      "acceptance": ["Permission, extraction, offline and migration failures are distinguishable.", "Views are paged and never display secret/contents from raw diagnostic payloads."]
+    },
+    {
+      "id": "LFI-065", "phase": 6, "title": "Tray integration", "dependsOn": ["LFI-060", "LFI-061"],
+      "scope": "Add accessible tray open/close/status behavior without owning service lifetime.",
+      "acceptance": ["UI/tray exit leaves service indexing; reopen restores connection/state.", "Duplicate instances, shutdown and notification-area lifecycle are tested."]
+    },
+    {
+      "id": "LFI-066", "phase": 6, "title": "Settings and exclusions", "dependsOn": ["LFI-060", "LFI-024", "LFI-054"],
+      "scope": "Edit bounded local settings and normalized exclusions through owner control IPC.",
+      "acceptance": ["Changes persist and safely trigger required reconciliation/policy revision.", "Invalid settings/exclusions fail visibly; no hidden scope expansion or cloud default."]
+    },
+    {
+      "id": "LFI-070", "phase": 7, "title": "Extractor interface", "dependsOn": ["LFI-002", "LFI-013"],
+      "scope": "Define local extractor inputs/results, revision/provenance, supported types and explicit failure/budget contracts.",
+      "acceptance": ["Interfaces support cancellation, size/time limits and isolated read-only handle processing.", "No cloud, Office automation or arbitrary path access is embedded in the contract."]
+    },
+    {
+      "id": "LFI-071", "phase": 7, "title": "Text, Markdown, JSON, XML and CSV extraction", "dependsOn": ["LFI-070", "LFI-023"],
+      "scope": "Implement strict local text decoding and bounded isolated extraction for the specified formats.",
+      "acceptance": ["Encoding/BOM/Unicode, oversized content, invalid input and concurrent file changes are covered.", "Restricted-token/handle/network denial and Job Object budgets are tested; XML external entities are disabled."]
+    },
+    {
+      "id": "LFI-072", "phase": 7, "title": "Source-code extraction", "dependsOn": ["LFI-071"],
+      "scope": "Add explicit source-extension handling and plain-text extraction with provenance.",
+      "acceptance": ["Supported source files index as data without compilation/execution.", "Binary/minified/oversized/invalid encoding cases are bounded and explicit."]
+    },
+    {
+      "id": "LFI-073", "phase": 7, "title": "PDF extraction", "dependsOn": ["LFI-070", "LFI-071"],
+      "scope": "Add a reviewed pinned local PDF parser inside the existing isolation boundary.",
+      "acceptance": ["Synthetic valid/malformed/encrypted/large PDFs and parser crash/timeouts are covered.", "No network links, active content, cloud conversion or unapproved OCR; licensing/deployment risks are recorded."]
+    },
+    {
+      "id": "LFI-074", "phase": 7, "title": "Office extraction", "dependsOn": ["LFI-070", "LFI-071"],
+      "scope": "Extract supported Office formats locally using reviewed parsers, without Office automation.",
+      "acceptance": ["Synthetic document/spreadsheet/presentation, corrupt package, zip-bomb and encrypted-file cases are bounded.", "Macros/external relationships never execute or fetch network content; unsupported legacy formats are explicit."]
+    },
+    {
+      "id": "LFI-075", "phase": 7, "title": "FTS5 search service", "dependsOn": ["LFI-015", "LFI-071"],
+      "scope": "Implement parameterized, grant-scoped literal-term FTS queries with ranking, excerpts, paging and freshness.",
+      "acceptance": ["Metadata-only access cannot infer content through matches/excerpts; stale/revoked content is excluded.", "FTS escaping, byte/result limits, snapshot mismatch and a documented synthetic performance baseline are tested."]
+    },
+    {
+      "id": "LFI-076", "phase": 7, "title": "Search UI", "dependsOn": ["LFI-061", "LFI-075"],
+      "scope": "Add metadata/full-text search, filters, excerpts and source references through IPC.",
+      "acceptance": ["Search stays responsive with cancellation and explicit empty/partial/failure states.", "Excerpts are rendered as plain untrusted text; no active links/macros or direct SQLite."]
+    },
+    {
+      "id": "LFI-080", "phase": 8, "title": "MCP server executable", "dependsOn": ["LFI-001", "LFI-002"],
+      "scope": "Replace the fail-fast scaffold with an official-SDK executable and pinned protocol compatibility.",
+      "acceptance": ["SDK version/negotiation and supported protocol versions are recorded.", "There is no HTTP listener, cloud dependency or direct Storage reference."]
+    },
+    {
+      "id": "LFI-081", "phase": 8, "title": "stdio transport", "dependsOn": ["LFI-080"],
+      "scope": "Implement SDK stdio lifecycle, clean stdout, stderr diagnostics, cancellation and EOF shutdown.",
+      "acceptance": ["Real process tests cover initialize, malformed messages, cancellation and EOF.", "Only protocol JSON reaches stdout; diagnostics contain no personal data."]
+    },
+    {
+      "id": "LFI-082", "phase": 8, "title": "IPC client integration", "dependsOn": ["LFI-081", "LFI-052", "LFI-054"],
+      "scope": "Map MCP requests to authenticated service queries with deadlines and explicit errors.",
+      "acceptance": ["Service unavailable/version mismatch/broken pipe/timeout map correctly.", "Adapter never opens SQLite or arbitrary files and does not auto-start elevated services."]
+    },
+    {
+      "id": "LFI-083", "phase": 8, "title": "Agent registration and sessions", "dependsOn": ["LFI-082", "LFI-053"],
+      "scope": "Persist clients/sessions, owner-approved per-root/content grants, DPAPI capabilities and visible declared locality.",
+      "acceptance": ["New clients have no grants; registration/revocation/session cleanup and locality unknown/cloud/local are tested.", "Consent management is owner-controlled; profile IDs or client locality claims alone never authorize access."]
+    },
+    {
+      "id": "LFI-084", "phase": 8, "title": "Read-only tools, resources and prompts", "dependsOn": ["LFI-082", "LFI-083", "LFI-023", "LFI-063", "LFI-075"],
+      "scope": "Implement all nine tools, three resources and three prompts exactly as versioned contracts.",
+      "acceptance": ["Schema/example/protocol tests cover each operation, bounded outputs, relative-path and file-ID resolution.", "No mutating tool, arbitrary URI/path, sampling or scope expansion; prompt expansion reads no files."]
+    },
+    {
+      "id": "LFI-085", "phase": 8, "title": "Authorization and audit events", "dependsOn": ["LFI-083", "LFI-084"],
+      "scope": "Complete service-side grant/live-access enforcement and scoped redacted audit/resource events.",
+      "acceptance": ["Cross-root/client, revoked/disabled, stale/read-size and metadata-only content inference cases are denied.", "Audit/resource data omit paths, queries, contents and secrets; retention and response limits are enforced."]
+    },
+    {
+      "id": "LFI-086", "phase": 8, "title": "Multiple-client integration tests", "dependsOn": ["LFI-084", "LFI-085", "LFI-065"],
+      "scope": "Exercise at least two independent MCP client implementations against separate adapters sharing one service.",
+      "acceptance": ["Concurrent tools/resources/prompts, cancellation, EOF, grant isolation and UI-closed operation pass.", "Record versions/configurations and show that strict local AI also requires local clients/models."]
+    },
+    {
+      "id": "LFI-090", "phase": 9, "title": "Installer and upgrade strategy", "dependsOn": ["LFI-031", "LFI-066", "LFI-076", "LFI-086"],
+      "scope": "Package a versioned Windows release with explicit install/upgrade/rollback/uninstall behavior.",
+      "acceptance": ["Clean isolated Windows install and upgrade preserve roots/grants/data or fail recoverably.", "No insecure account fallback, silent model download or automatic destructive uninstall."]
+    },
+    {
+      "id": "LFI-091", "phase": 9, "title": "Service and filesystem permissions", "dependsOn": ["LFI-090", "LFI-034", "LFI-053"],
+      "scope": "Validate deployment-time service, binary, data-directory, pipe and root permissions.",
+      "acceptance": ["Clean install/upgrade/restart retain owner-only boundaries under separate Windows identities.", "Reparse/ACL swaps and writable binary/data paths fail closed; no bypass privileges are granted."]
+    },
+    {
+      "id": "LFI-092", "phase": 9, "title": "Backup and restore", "dependsOn": ["LFI-011", "LFI-090"],
+      "scope": "Provide owner-controlled SQLite backup/restore and documented retention/encryption limits.",
+      "acceptance": ["WAL-active backup, restore, corruption, wrong/newer version and interrupted restore cases pass.", "Backups inherit restrictive permissions; no silent reset or physical secure-erase claims."]
+    },
+    {
+      "id": "LFI-093", "phase": 9, "title": "Diagnostics", "dependsOn": ["LFI-033", "LFI-064", "LFI-085"],
+      "scope": "Finalize bounded redacted operational diagnostics and owner-controlled support information.",
+      "acceptance": ["Useful correlation/error/health evidence is available without document text or secrets.", "Disk pressure, repeated failures and support export are bounded and explicitly approved."]
+    },
+    {
+      "id": "LFI-094", "phase": 9, "title": "Security and acceptance tests", "dependsOn": ["LFI-045", "LFI-073", "LFI-074", "LFI-086", "LFI-091", "LFI-092", "LFI-093"],
+      "scope": "Exercise working-index and release acceptance in clean Windows VMs using adversarial synthetic fixtures.",
+      "acceptance": ["Install/UI/root/index/close-UI/change/restart/no-cloud working-index criteria pass.", "Authorization, TOCTOU, parser isolation, upgrade/recovery, resource budgets and unresolved risks are documented."]
+    },
+    {
+      "id": "LFI-100", "phase": 10, "title": "Chunking", "dependsOn": ["LFI-075", "LFI-094"],
+      "scope": "Add a separate migration and revision-bound chunks with offsets/provenance, after the initial release.",
+      "acceptance": ["Chunk boundaries preserve Unicode and source references with bounded overlap.", "Source change/revocation purges stale chunks; initial migrations are not rewritten."]
+    },
+    {
+      "id": "LFI-101", "phase": 10, "title": "Local embeddings", "dependsOn": ["LFI-100"],
+      "scope": "Import owner-approved local model/tokenizer artifacts and generate bounded offline embeddings.",
+      "acceptance": ["Checksum/license/version/dimension/normalization metadata is verified and persisted.", "No automatic download/cloud inference; cancellation, memory limits and model-change invalidation are tested."]
+    },
+    {
+      "id": "LFI-102", "phase": 10, "title": "Local vector search", "dependsOn": ["LFI-101"],
+      "scope": "Implement a bounded exact reference, then select an ANN/native index only with measured justification.",
+      "acceptance": ["Golden synthetic retrieval cases and a benchmark-backed selection ADR exist.", "Incompatible models/vectors are never mixed; root/content grants and revocation are enforced."]
+    },
+    {
+      "id": "LFI-103", "phase": 10, "title": "Semantic search MCP tool", "dependsOn": ["LFI-102", "LFI-084"],
+      "scope": "Version and expose optional local semantic retrieval with source IDs and provenance.",
+      "acceptance": ["Tool is disabled until a model is explicitly configured and approved.", "Schemas, multi-client behavior, bounds and content authorization are tested; no silent cloud fallback."]
+    },
+    {
+      "id": "LFI-104", "phase": 10, "title": "Summaries and related-file discovery", "dependsOn": ["LFI-101", "LFI-103"],
+      "scope": "Add explicitly local, approved-model intelligence with evidence and related-file references.",
+      "acceptance": ["Summaries distinguish inference from evidence and cite current authorized sources.", "Prompt injection, model budgets, cancellation and locality are addressed; no autonomous file mutation."]
+    },
+    {
+      "id": "LFI-105", "phase": 10, "title": "Local agent integration", "dependsOn": ["LFI-103", "LFI-104"],
+      "scope": "Validate end-to-end local agents/models with the completed intelligence surface.",
+      "acceptance": ["Recorded agent/model versions work with networking disabled and independently scoped sessions.", "Data remains local under the tested configuration and locality claims/limitations are explicit."]
+    }
+  ]
+}

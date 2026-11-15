@@ -1,0 +1,44 @@
+name: Implementation
+description: A bounded, testable increment in the Local File Intelligence roadmap.
+title: "[LFI-###] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Use synthetic examples only. Do not include personal paths, content, databases, or credentials.
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone and dependencies
+      placeholder: "Phase 1; LFI-010; depends on linked foundation issues"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome and scope
+      description: Describe the smallest complete behavior and what is explicitly out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Architecture and contracts
+      description: Link relevant ADRs, specification sections, schemas, and project boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include concrete success, failure, cancellation, and privacy cases.
+      placeholder: "- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: List unit/integration/manual checks and any isolated-VM requirements.
+    validations:
+      required: true

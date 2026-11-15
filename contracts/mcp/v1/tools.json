@@ -1,0 +1,604 @@
+{
+  "tools": [
+    {
+      "name": "get_index_status",
+      "description": "Get service/index health scoped to this client's grants, including declared agent locality.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["state", "filesIndexed", "directoriesIndexed", "pendingJobs", "indexRevision", "processing", "agentLocality"],
+                "properties": {
+                  "state": { "enum": ["idle", "indexing", "paused", "degraded"] },
+                  "filesIndexed": { "type": "integer", "minimum": 0 },
+                  "directoriesIndexed": { "type": "integer", "minimum": 0 },
+                  "pendingJobs": { "type": "integer", "minimum": 0 },
+                  "indexRevision": { "type": "integer", "minimum": 0 },
+                  "processing": { "const": "local" },
+                  "agentLocality": {
+                    "type": "object", "additionalProperties": false, "required": ["reported", "assurance"],
+                    "properties": {
+                      "reported": { "enum": ["local", "cloud", "unknown"] },
+                      "assurance": { "const": "client_declared" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "list_index_roots",
+      "description": "List only approved roots. Disabled roots are optional; canonical absolute paths are never returned.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false,
+        "properties": { "includeDisabled": { "type": "boolean", "default": false } }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false, "required": ["roots"],
+                "properties": {
+                  "roots": {
+                    "type": "array", "maxItems": 32,
+                    "items": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["rootId", "displayName", "enabled", "status", "contentAllowed"],
+                      "properties": {
+                        "rootId": { "type": "integer", "minimum": 1 },
+                        "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "enabled": { "type": "boolean" },
+                        "status": { "enum": ["pending", "scanning", "ready", "paused", "offline", "access_denied", "error"] },
+                        "contentAllowed": { "type": "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "search_files",
+      "description": "Search indexed filenames and relative paths in granted roots. Does not search or return file content.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "rootIds": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+          "extensions": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "pattern": "^\\.[a-zA-Z0-9]{1,16}$" } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 },
+          "expectedIndexRevision": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["entries", "nextOffset", "indexRevision", "partial", "untrusted"],
+                "properties": {
+                  "entries": {
+                    "type": "array", "maxItems": 100,
+                    "items": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["fileId", "rootId", "relativePath", "name", "entryType", "sizeBytes", "modifiedAt", "revision"],
+                      "properties": {
+                        "fileId": { "type": "integer", "minimum": 1 },
+                        "rootId": { "type": "integer", "minimum": 1 },
+                        "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+                        "entryType": { "enum": ["file", "directory"] },
+                        "sizeBytes": { "type": "integer", "minimum": 0 },
+                        "modifiedAt": { "type": "string", "format": "date-time" },
+                        "revision": { "type": "integer", "minimum": 1 }
+                      }
+                    }
+                  },
+                  "nextOffset": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000 },
+                  "indexRevision": { "type": "integer", "minimum": 0 },
+                  "partial": { "type": "boolean" },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "search_content",
+      "description": "Run bounded literal-term FTS5 search over content-consented roots. Excerpts are untrusted document data.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "rootIds": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 },
+          "expectedIndexRevision": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["matches", "nextOffset", "indexRevision", "partial", "untrusted"],
+                "properties": {
+                  "matches": {
+                    "type": "array", "maxItems": 100,
+                    "items": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["fileId", "rootId", "relativePath", "revision", "excerpt", "rank"],
+                      "properties": {
+                        "fileId": { "type": "integer", "minimum": 1 },
+                        "rootId": { "type": "integer", "minimum": 1 },
+                        "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                        "revision": { "type": "integer", "minimum": 1 },
+                        "excerpt": { "type": "string", "maxLength": 512 },
+                        "rank": { "type": "number" }
+                      }
+                    }
+                  },
+                  "nextOffset": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000 },
+                  "indexRevision": { "type": "integer", "minimum": 0 },
+                  "partial": { "type": "boolean" },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "list_directory",
+      "description": "List indexed children of a validated path relative to an approved root, without arbitrary filesystem access.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["rootId"],
+        "properties": {
+          "rootId": { "type": "integer", "minimum": 1 },
+          "relativePath": {
+            "type": "string", "maxLength": 32767, "default": "",
+            "pattern": "^(?:[^\\\\/:*?\"<>|\\u0000-\\u001f]+(?:\\\\[^\\\\/:*?\"<>|\\u0000-\\u001f]+)*)?$",
+            "not": { "pattern": "(^|\\\\)\\.{1,2}(\\\\|$)" }
+          },
+          "entryType": { "enum": ["all", "file", "directory"], "default": "all" },
+          "extensions": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "pattern": "^\\.[a-zA-Z0-9]{1,16}$" } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 },
+          "expectedIndexRevision": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["rootId", "relativePath", "entries", "nextOffset", "indexRevision", "partial", "untrusted"],
+                "properties": {
+                  "rootId": { "type": "integer", "minimum": 1 },
+                  "relativePath": { "type": "string", "maxLength": 32767 },
+                  "entries": {
+                    "type": "array", "maxItems": 100,
+                    "items": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["fileId", "name", "relativePath", "entryType", "sizeBytes"],
+                      "properties": {
+                        "fileId": { "type": "integer", "minimum": 1 },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+                        "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                        "entryType": { "enum": ["file", "directory"] },
+                        "sizeBytes": { "type": "integer", "minimum": 0 }
+                      }
+                    }
+                  },
+                  "nextOffset": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000 },
+                  "indexRevision": { "type": "integer", "minimum": 0 },
+                  "partial": { "type": "boolean" },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "get_file_metadata",
+      "description": "Get authorized indexed file/directory metadata. SHA-256 is null without content consent. No absolute path is returned.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["fileId"],
+        "properties": { "fileId": { "type": "integer", "minimum": 1 } }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["fileId", "rootId", "relativePath", "name", "extension", "entryType", "sizeBytes", "createdAt", "modifiedAt", "lastIndexedAt", "sha256", "extractionStatus", "revision", "untrusted"],
+                "properties": {
+                  "fileId": { "type": "integer", "minimum": 1 },
+                  "rootId": { "type": "integer", "minimum": 1 },
+                  "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                  "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+                  "extension": { "type": "string", "maxLength": 256 },
+                  "entryType": { "enum": ["file", "directory"] },
+                  "sizeBytes": { "type": "integer", "minimum": 0 },
+                  "createdAt": { "type": "string", "format": "date-time" },
+                  "modifiedAt": { "type": "string", "format": "date-time" },
+                  "lastIndexedAt": { "type": ["string", "null"], "format": "date-time" },
+                  "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+                  "extractionStatus": { "enum": ["pending", "extracted", "unsupported", "failed"] },
+                  "revision": { "type": "integer", "minimum": 1 },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a supported local text file by authorized indexed ID. Reject files exceeding maxBytes; no truncation, arbitrary paths, binary reads, or active rendering.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["fileId"],
+        "properties": {
+          "fileId": { "type": "integer", "minimum": 1 },
+          "maxBytes": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 65536 },
+          "expectedRevision": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["fileId", "revision", "text", "encoding", "bytesRead", "untrusted"],
+                "properties": {
+                  "fileId": { "type": "integer", "minimum": 1 },
+                  "revision": { "type": "integer", "minimum": 1 },
+                  "text": { "type": "string", "maxLength": 65536 },
+                  "encoding": { "enum": ["utf-8", "utf-16le", "utf-16be"] },
+                  "bytesRead": { "type": "integer", "minimum": 0, "maximum": 65536 },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "get_directory_tree",
+      "description": "Return a bounded flat tree of indexed descendants with relative paths/depth. Does not traverse arbitrary live directories.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false, "required": ["rootId"],
+        "properties": {
+          "rootId": { "type": "integer", "minimum": 1 },
+          "relativePath": {
+            "type": "string", "maxLength": 32767, "default": "",
+            "pattern": "^(?:[^\\\\/:*?\"<>|\\u0000-\\u001f]+(?:\\\\[^\\\\/:*?\"<>|\\u0000-\\u001f]+)*)?$",
+            "not": { "pattern": "(^|\\\\)\\.{1,2}(\\\\|$)" }
+          },
+          "depth": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3 },
+          "entryLimit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 200 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false,
+                "required": ["rootId", "relativePath", "entries", "truncated", "untrusted"],
+                "properties": {
+                  "rootId": { "type": "integer", "minimum": 1 },
+                  "relativePath": { "type": "string", "maxLength": 32767 },
+                  "entries": {
+                    "type": "array", "maxItems": 1000,
+                    "items": {
+                      "type": "object", "additionalProperties": false, "required": ["fileId", "relativePath", "entryType", "depth"],
+                      "properties": {
+                        "fileId": { "type": "integer", "minimum": 1 },
+                        "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                        "entryType": { "enum": ["file", "directory"] },
+                        "depth": { "type": "integer", "minimum": 1, "maximum": 8 }
+                      }
+                    }
+                  },
+                  "truncated": { "type": "boolean" },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "find_duplicates",
+      "description": "Group authorized current files by size and SHA-256. Requires content consent. Reports whether entries share file identity; does not delete anything.",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "rootIds": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+          "minimumSize": { "type": "integer", "minimum": 0, "default": 1 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+        }
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false, "required": ["ok", "data"],
+            "properties": {
+              "ok": { "const": true },
+              "data": {
+                "type": "object", "additionalProperties": false, "required": ["groups", "truncated", "untrusted"],
+                "properties": {
+                  "groups": {
+                    "type": "array", "maxItems": 100,
+                    "items": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["sha256", "sizeBytes", "files", "totalFiles", "truncated"],
+                      "properties": {
+                        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                        "sizeBytes": { "type": "integer", "minimum": 0 },
+                        "totalFiles": { "type": "integer", "minimum": 2 },
+                        "truncated": { "type": "boolean" },
+                        "files": {
+                          "type": "array", "minItems": 2, "maxItems": 100,
+                          "items": {
+                            "type": "object", "additionalProperties": false, "required": ["fileId", "rootId", "relativePath", "sameFileIdentity"],
+                            "properties": {
+                              "fileId": { "type": "integer", "minimum": 1 },
+                              "rootId": { "type": "integer", "minimum": 1 },
+                              "relativePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+                              "sameFileIdentity": { "type": ["boolean", "null"] }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "truncated": { "type": "boolean" },
+                  "untrusted": { "const": true }
+                }
+              }
+            }
+          },
+          { "$ref": "#/$defs/error" }
+        ],
+        "$defs": {
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["ok", "error"],
+            "properties": {
+              "ok": { "const": false },
+              "error": {
+                "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "correlationId"],
+                "properties": {
+                  "code": { "enum": ["ROOT_NOT_FOUND", "ROOT_DISABLED", "FILE_NOT_FOUND", "PATH_OUTSIDE_ROOT", "CONTENT_NOT_AVAILABLE", "UNSUPPORTED_FILE_TYPE", "SIZE_LIMIT_EXCEEDED", "INDEX_BUSY", "SERVICE_UNAVAILABLE", "ACCESS_DENIED"] },
+                  "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+                  "retryable": { "type": "boolean" },
+                  "correlationId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

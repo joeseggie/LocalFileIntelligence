@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore locked dependencies
+        run: dotnet restore LocalFileIntelligence.sln --locked-mode
+      - name: Build
+        run: dotnet build LocalFileIntelligence.sln --configuration Release --no-restore
+      - name: Test code, SQL schema, and MCP contracts
+        run: dotnet test LocalFileIntelligence.sln --configuration Release --no-build
+      - name: Verify formatting
+        run: dotnet format LocalFileIntelligence.sln --verify-no-changes --no-restore
+      - name: Validate the empty example configuration
+        run: dotnet run --project src\LocalFileIntelligence.WindowsService --configuration Release --no-build -- --validate-config config\indexing.example.json
