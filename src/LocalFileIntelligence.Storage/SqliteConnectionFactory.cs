@@ -2,16 +2,21 @@ using Microsoft.Data.Sqlite;
 
 namespace LocalFileIntelligence.Storage;
 
-public sealed class SqliteConnectionFactory
+public sealed class SqliteConnectionFactory : IDisposable
 {
     private const int BusyTimeoutMilliseconds = 5000;
     private readonly string _connectionString;
     private readonly string _readOnlyConnectionString;
     private readonly SemaphoreSlim _writerGate = new(1, 1);
     private readonly SemaphoreSlim _readerGate;
+    private readonly SqliteStorageGuard _storageGuard;
+    private readonly int _maxReaders;
+    private int _disposed;
 
-    private SqliteConnectionFactory(string databasePath, int maxReaders)
+    private SqliteConnectionFactory(string databasePath, int maxReaders, SqliteStorageGuard storageGuard)
     {
+        _storageGuard = storageGuard;
+        _maxReaders = maxReaders;
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
@@ -44,22 +49,30 @@ public sealed class SqliteConnectionFactory
         ValidatePathComponents(fullPath);
 
         string databasePath = Path.Combine(fullPath, "index.db");
-        if (HasReparsePoint(databasePath))
+        SqliteStorageGuard storageGuard = SqliteStorageGuard.Create(fullPath, databasePath);
+        try
         {
-            throw new ArgumentException("The database file must not be a reparse point.", nameof(dataDirectory));
+            storageGuard.ValidateBeforeOpen();
+
+            SqliteConnectionFactory factory = new(databasePath, maxReaders, storageGuard);
+            await using SqliteConnection connection = new(factory._connectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureConnectionAsync(connection, setWal: true, readOnly: false, cancellationToken)
+                .ConfigureAwait(false);
+            storageGuard.PinDatabaseFile();
+
+            return factory;
         }
-
-        SqliteConnectionFactory factory = new(databasePath, maxReaders);
-        await using SqliteConnection connection = new(factory._connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await ConfigureConnectionAsync(connection, setWal: true, readOnly: false, cancellationToken)
-            .ConfigureAwait(false);
-
-        return factory;
+        catch
+        {
+            storageGuard.Dispose();
+            throw;
+        }
     }
 
     public async Task<SqliteConnectionLease> OpenWriterAsync(CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         await _writerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         return await OpenConnectionAsync(_connectionString, _writerGate, readOnly: false, cancellationToken)
             .ConfigureAwait(false);
@@ -67,12 +80,13 @@ public sealed class SqliteConnectionFactory
 
     public async Task<SqliteConnectionLease> OpenReaderAsync(CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         await _readerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         return await OpenConnectionAsync(_readOnlyConnectionString, _readerGate, readOnly: true, cancellationToken)
             .ConfigureAwait(false);
     }
 
-    private static async Task<SqliteConnectionLease> OpenConnectionAsync(
+    private async Task<SqliteConnectionLease> OpenConnectionAsync(
         string connectionString,
         SemaphoreSlim gate,
         bool readOnly,
@@ -81,6 +95,8 @@ public sealed class SqliteConnectionFactory
         SqliteConnection? connection = null;
         try
         {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            _storageGuard.ValidateBeforeOpen();
             connection = new SqliteConnection(connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await ConfigureConnectionAsync(connection, setWal: false, readOnly, cancellationToken)
@@ -211,8 +227,62 @@ public sealed class SqliteConnectionFactory
             throw new ArgumentException("The data directory must be on a local drive.", nameof(dataDirectory));
         }
 
+        ValidateStorageLocation(fullPath);
         ValidatePathComponents(fullPath);
         return fullPath;
+    }
+
+    private static void ValidateStorageLocation(string fullPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string localApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localApplicationData)
+            || !IsStrictlyWithin(fullPath, Path.GetFullPath(localApplicationData)))
+        {
+            throw new ArgumentException(
+                "The data directory must be below the current owner's local application-data directory.",
+                nameof(fullPath));
+        }
+
+        string?[] knownSyncRoots =
+        [
+            Environment.GetEnvironmentVariable("OneDrive"),
+            Environment.GetEnvironmentVariable("OneDriveCommercial"),
+            Environment.GetEnvironmentVariable("OneDriveConsumer"),
+            Environment.GetEnvironmentVariable("Dropbox"),
+            Environment.GetEnvironmentVariable("GoogleDrive"),
+        ];
+        foreach (string? syncRoot in knownSyncRoots)
+        {
+            if (!string.IsNullOrWhiteSpace(syncRoot)
+                && IsWithin(fullPath, Path.GetFullPath(syncRoot)))
+            {
+                throw new ArgumentException(
+                    "The data directory must not be under a known synchronized-storage location.",
+                    nameof(fullPath));
+            }
+        }
+    }
+
+    private static bool IsStrictlyWithin(string path, string parent)
+    {
+        return !string.Equals(
+                Path.TrimEndingDirectorySeparator(path),
+                Path.TrimEndingDirectorySeparator(parent),
+                StringComparison.OrdinalIgnoreCase)
+            && IsWithin(path, parent);
+    }
+
+    private static bool IsWithin(string path, string parent)
+    {
+        string relativePath = Path.GetRelativePath(parent, path);
+        return !Path.IsPathRooted(relativePath)
+            && relativePath != ".."
+            && !relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static void ValidatePathComponents(string fullPath)
@@ -250,5 +320,21 @@ public sealed class SqliteConnectionFactory
         {
             return false;
         }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        if (_writerGate.CurrentCount != 1 || _readerGate.CurrentCount != _maxReaders)
+        {
+            Volatile.Write(ref _disposed, 0);
+            throw new InvalidOperationException("Dispose the SQLite connection factory after all leases are released.");
+        }
+
+        _storageGuard.Dispose();
     }
 }

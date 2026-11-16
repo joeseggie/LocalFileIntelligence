@@ -68,6 +68,12 @@ Resolve an explicit non-roaming/non-synchronized owner-restricted directory befo
 writing. DB, WAL, SHM, logs, and backups inherit the same restrictions. Do not use the
 working directory or a client-supplied database path.
 
+The LFI-010 factory currently enforces Local Application Data on Windows, checks known
+sync-root environment variables and Windows ACL ownership/access, and holds directory
+and database handles to prevent replacement while it is in use. It cannot detect
+arbitrary unregistered sync software; service enrollment must add a trusted per-owner
+location policy before claiming that such locations are excluded.
+
 Migrations are ordered, immutable, and SHA-256 checksummed. Obtain the exclusive
 migration lease, back up through SQLite's backup API, and apply each migration plus its
 ledger row transactionally. Refuse gaps, checksum mismatch, and unsupported newer
