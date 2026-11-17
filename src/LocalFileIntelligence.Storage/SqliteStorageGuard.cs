@@ -16,6 +16,8 @@ internal sealed class SqliteStorageGuard : IDisposable
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeReparsePoint = 0x00000400;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
 
     private readonly string _directoryPath;
     private readonly string _databasePath;
@@ -211,10 +213,17 @@ internal sealed class SqliteStorageGuard : IDisposable
         using WindowsIdentity identity = WindowsIdentity.GetCurrent();
         SecurityIdentifier owner = identity.User
             ?? throw new UnauthorizedAccessException("The current Windows owner SID could not be determined.");
-        SecurityIdentifier? tokenOwner = identity.Owner;
         FileSystemSecurity security = isDirectory
             ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
             : new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        VerifyRestrictedAccess(security, owner, identity.Owner);
+    }
+
+    internal static void VerifyRestrictedAccess(
+        FileSystemSecurity security,
+        SecurityIdentifier owner,
+        SecurityIdentifier? tokenOwner)
+    {
         if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier actualOwner
             || (!actualOwner.Equals(owner) && (tokenOwner is null || !actualOwner.Equals(tokenOwner))))
         {
@@ -241,7 +250,7 @@ internal sealed class SqliteStorageGuard : IDisposable
         }
     }
 
-    private static SafeFileHandle OpenHandle(string path, bool isDirectory)
+    internal static SafeFileHandle OpenHandle(string path, bool isDirectory)
     {
         uint flags = FileFlagOpenReparsePoint | (isDirectory ? FileFlagBackupSemantics : 0);
         SafeFileHandle handle = CreateFile(
@@ -256,9 +265,20 @@ internal sealed class SqliteStorageGuard : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
             handle.Dispose();
+            Win32Exception nativeError = new(error);
+            if (error == ErrorFileNotFound)
+            {
+                throw new FileNotFoundException("The SQLite storage file could not be opened safely.", path, nativeError);
+            }
+
+            if (error == ErrorPathNotFound)
+            {
+                throw new DirectoryNotFoundException("The SQLite storage path could not be opened safely.", nativeError);
+            }
+
             throw new IOException(
                 "The SQLite storage path could not be opened safely.",
-                new Win32Exception(error));
+                nativeError);
         }
 
         return handle;

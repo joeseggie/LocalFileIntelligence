@@ -1,5 +1,8 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using LocalFileIntelligence.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -79,7 +82,7 @@ public sealed class SqliteConnectionFactoryTests
             () => SqliteConnectionFactory.CreateAsync(@"\\server\share\lfi"));
     }
 
-    [Fact]
+    [ReparsePointFact]
     public async Task RejectsReparsePointDataDirectory()
     {
         using TemporaryDirectory directory = new();
@@ -89,6 +92,96 @@ public sealed class SqliteConnectionFactoryTests
         Directory.CreateSymbolicLink(linkPath, targetPath);
 
         await Assert.ThrowsAsync<ArgumentException>(() => SqliteConnectionFactory.CreateAsync(linkPath));
+    }
+
+    [WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public void RestrictedAccessAllowsOwnerSystemAndAdministrators()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier owner = identity.User
+            ?? throw new InvalidOperationException("The current Windows owner SID could not be determined.");
+        SecurityIdentifier system = new(WellKnownSidType.LocalSystemSid, null);
+        SecurityIdentifier administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
+
+        foreach (bool isDirectory in new[] { true, false })
+        {
+            FileSystemSecurity security = CreateSecurityDescriptor(
+                isDirectory,
+                owner,
+                owner,
+                system,
+                administrators);
+            SqliteStorageGuard.VerifyRestrictedAccess(security, owner, tokenOwner: null);
+        }
+    }
+
+    [WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public void RestrictedAccessRejectsUnexpectedOwnerAndOtherSid()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier owner = identity.User
+            ?? throw new InvalidOperationException("The current Windows owner SID could not be determined.");
+        SecurityIdentifier unexpectedOwner = new("S-1-5-21-0-0-0-1");
+        SecurityIdentifier everyone = new(WellKnownSidType.WorldSid, null);
+
+        foreach (bool isDirectory in new[] { true, false })
+        {
+            FileSystemSecurity wrongOwner = CreateSecurityDescriptor(isDirectory, unexpectedOwner, owner);
+            Assert.Throws<UnauthorizedAccessException>(
+                () => SqliteStorageGuard.VerifyRestrictedAccess(wrongOwner, owner, tokenOwner: null));
+
+            FileSystemSecurity shared = CreateSecurityDescriptor(isDirectory, owner, owner, everyone);
+            Assert.Throws<UnauthorizedAccessException>(
+                () => SqliteStorageGuard.VerifyRestrictedAccess(shared, owner, tokenOwner: null));
+        }
+    }
+
+    [WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public async Task RejectsUnsafeDirectoryBeforeCreatingDatabase()
+    {
+        using TemporaryDirectory directory = new();
+        AddAccessForEveryone(directory.Path, isDirectory: true);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => SqliteConnectionFactory.CreateAsync(directory.Path));
+        Assert.False(File.Exists(Path.Combine(directory.Path, "index.db")));
+    }
+
+    [WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public async Task RejectsDatabaseAndSidecarAclChangesBeforeOpeningLease()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+
+        string databasePath = Path.Combine(directory.Path, "index.db");
+        AddAccessForEveryone(databasePath, isDirectory: false);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => factory.OpenWriterAsync());
+
+        using TemporaryDirectory sidecarDirectory = new();
+        using SqliteConnectionFactory sidecarFactory =
+            await SqliteConnectionFactory.CreateAsync(sidecarDirectory.Path);
+        string sidecarPath = Path.Combine(sidecarDirectory.Path, "index.db-wal");
+        await File.WriteAllTextAsync(sidecarPath, "synthetic");
+        AddAccessForEveryone(sidecarPath, isDirectory: false);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => sidecarFactory.OpenReaderAsync());
+    }
+
+    [WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public void PreservesNativeMissingFileAndPathErrors()
+    {
+        using TemporaryDirectory directory = new();
+
+        Assert.Throws<FileNotFoundException>(
+            () => SqliteStorageGuard.OpenHandle(Path.Combine(directory.Path, "missing.db"), isDirectory: false));
+        Assert.Throws<DirectoryNotFoundException>(
+            () => SqliteStorageGuard.OpenHandle(
+                Path.Combine(directory.Path, "missing", "index.db"),
+                isDirectory: false));
     }
 
     [WindowsFact]
@@ -161,6 +254,83 @@ public sealed class SqliteConnectionFactoryTests
         await command.ExecuteNonQueryAsync();
     }
 
+    [SupportedOSPlatform("windows")]
+    private static FileSystemSecurity CreateSecurityDescriptor(
+        bool isDirectory,
+        SecurityIdentifier owner,
+        params SecurityIdentifier[] allowedSids)
+    {
+        FileSystemSecurity security = isDirectory ? new DirectorySecurity() : new FileSecurity();
+        security.SetOwner(owner);
+        foreach (SecurityIdentifier sid in allowedSids)
+        {
+            FileSystemAccessRule rule = isDirectory
+                ? new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow)
+                : new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow);
+            if (isDirectory)
+            {
+                ((DirectorySecurity)security).AddAccessRule(rule);
+            }
+            else
+            {
+                ((FileSecurity)security).AddAccessRule(rule);
+            }
+        }
+
+        return security;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AddAccessForEveryone(string path, bool isDirectory)
+    {
+        SecurityIdentifier everyone = new(WellKnownSidType.WorldSid, null);
+        FileSystemAccessRule rule = isDirectory
+            ? new FileSystemAccessRule(
+                everyone,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow)
+            : new FileSystemAccessRule(everyone, FileSystemRights.FullControl, AccessControlType.Allow);
+        if (isDirectory)
+        {
+            DirectoryInfo directory = new(path);
+            DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
+            security.AddAccessRule(rule);
+            directory.SetAccessControl(security);
+        }
+        else
+        {
+            FileInfo file = new(path);
+            FileSecurity security = file.GetAccessControl(AccessControlSections.Access);
+            security.AddAccessRule(rule);
+            file.SetAccessControl(security);
+        }
+    }
+
+    private static bool IsSymbolicLinkPrivilegeUnavailable(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Win32Exception nativeError && nativeError.NativeErrorCode == 1314)
+            {
+                return true;
+            }
+
+            if ((current.HResult & 0xFFFF) == 1314)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateHardLink(string fileName, string existingFileName, IntPtr securityAttributes);
@@ -189,6 +359,42 @@ public sealed class SqliteConnectionFactoryTests
             if (!OperatingSystem.IsWindows())
             {
                 Skip = "The Windows storage identity guard is platform-specific.";
+            }
+        }
+    }
+
+    public sealed class ReparsePointFactAttribute : FactAttribute
+    {
+        public ReparsePointFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            string probeDirectory = Path.Combine(Path.GetTempPath(), $"lfi-link-check-{Guid.NewGuid():N}");
+            string targetPath = Path.Combine(probeDirectory, "target");
+            string linkPath = Path.Combine(probeDirectory, "link");
+            try
+            {
+                Directory.CreateDirectory(targetPath);
+                Directory.CreateSymbolicLink(linkPath, targetPath);
+            }
+            catch (Exception exception) when (IsSymbolicLinkPrivilegeUnavailable(exception))
+            {
+                Skip = "Creating symbolic links requires Developer Mode or the Windows symbolic-link privilege.";
+            }
+            finally
+            {
+                if (Directory.Exists(linkPath))
+                {
+                    Directory.Delete(linkPath);
+                }
+
+                if (Directory.Exists(probeDirectory))
+                {
+                    Directory.Delete(probeDirectory, recursive: true);
+                }
             }
         }
     }
