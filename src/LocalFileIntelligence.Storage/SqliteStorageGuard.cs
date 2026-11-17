@@ -211,11 +211,12 @@ internal sealed class SqliteStorageGuard : IDisposable
         using WindowsIdentity identity = WindowsIdentity.GetCurrent();
         SecurityIdentifier owner = identity.User
             ?? throw new UnauthorizedAccessException("The current Windows owner SID could not be determined.");
+        SecurityIdentifier? tokenOwner = identity.Owner;
         FileSystemSecurity security = isDirectory
             ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
             : new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
         if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier actualOwner
-            || !actualOwner.Equals(owner))
+            || (!actualOwner.Equals(owner) && (tokenOwner is null || !actualOwner.Equals(tokenOwner))))
         {
             throw new UnauthorizedAccessException("SQLite storage must be owned by the current Windows account.");
         }
