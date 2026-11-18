@@ -1,8 +1,9 @@
 # Database design
 
 Status: proposed initial-release schema, executable as a Phase 0 design test.
-`database/schema.sql` is normative. Phase 1 implements the actual connection factory,
-checksummed SQL migrations, repositories, and on-disk recovery tests.
+`database/schema.sql` is normative. The LFI-010 connection factory and LFI-014 scan/job
+repositories exist, with the latter tested against this snapshot. Migrations and root/
+file repositories remain unimplemented, so the scan/job adapters are not production-wired.
 
 ## Data dictionary
 
