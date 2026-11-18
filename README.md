@@ -14,8 +14,10 @@ readers, cancellable leases, and verified connection settings. On Windows, it va
 the data location and owner-restricted access, and pins storage identities while the
 factory is alive.
 
-**The working local index is not implemented yet.** The connection factory is not wired
-into `WindowsService`; migrations, repositories, and indexing are not implemented. No
+LFI-014 adds Application contracts and Storage repositories for scan runs and index
+jobs, tested against the schema snapshot. **The working local index is not implemented
+yet.** The repositories are not production-wired: migrations and root/file repositories
+are not implemented, and the connection factory is not wired into `WindowsService`. No
 service is installed, no personal folders are scanned, and no desktop UI or MCP endpoint
 is active. Most projects establish boundaries only. `WindowsService` currently offers a
 safe, configuration-only command; `McpServer` fails explicitly until Phase 8 is
