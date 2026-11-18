@@ -150,24 +150,27 @@ public sealed class SqliteConnectionFactoryTests
         Assert.False(File.Exists(Path.Combine(directory.Path, "index.db")));
     }
 
-    [WindowsFact]
+    [WindowsTheory]
+    [InlineData("", true)]
+    [InlineData("index.db", false)]
+    [InlineData("index.db-wal", false)]
+    [InlineData("index.db-shm", false)]
+    [InlineData("index.db-journal", false)]
     [SupportedOSPlatform("windows")]
-    public async Task RejectsDatabaseAndSidecarAclChangesBeforeOpeningLease()
+    public async Task RejectsStorageAclChangesBeforeOpeningLease(string name, bool isDirectory)
     {
         using TemporaryDirectory directory = new();
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
 
-        string databasePath = Path.Combine(directory.Path, "index.db");
-        AddAccessForEveryone(databasePath, isDirectory: false);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => factory.OpenWriterAsync());
+        string path = Path.Combine(directory.Path, name);
+        if (!isDirectory && name != "index.db")
+        {
+            await File.WriteAllTextAsync(path, "synthetic");
+        }
 
-        using TemporaryDirectory sidecarDirectory = new();
-        using SqliteConnectionFactory sidecarFactory =
-            await SqliteConnectionFactory.CreateAsync(sidecarDirectory.Path);
-        string sidecarPath = Path.Combine(sidecarDirectory.Path, "index.db-wal");
-        await File.WriteAllTextAsync(sidecarPath, "synthetic");
-        AddAccessForEveryone(sidecarPath, isDirectory: false);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => sidecarFactory.OpenReaderAsync());
+        AddAccessForEveryone(path, isDirectory);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => factory.OpenWriterAsync());
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => factory.OpenReaderAsync());
     }
 
     [WindowsFact]
@@ -355,6 +358,17 @@ public sealed class SqliteConnectionFactoryTests
     public sealed class WindowsFactAttribute : FactAttribute
     {
         public WindowsFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                Skip = "The Windows storage identity guard is platform-specific.";
+            }
+        }
+    }
+
+    public sealed class WindowsTheoryAttribute : TheoryAttribute
+    {
+        public WindowsTheoryAttribute()
         {
             if (!OperatingSystem.IsWindows())
             {

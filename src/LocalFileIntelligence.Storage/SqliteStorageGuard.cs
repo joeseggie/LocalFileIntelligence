@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
@@ -8,6 +9,7 @@ namespace LocalFileIntelligence.Storage;
 
 internal sealed class SqliteStorageGuard : IDisposable
 {
+    private const uint FileReadData = 0x0001;
     private const uint FileReadAttributes = 0x0080;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
@@ -219,6 +221,7 @@ internal sealed class SqliteStorageGuard : IDisposable
         VerifyRestrictedAccess(security, owner, identity.Owner);
     }
 
+    [SupportedOSPlatform("windows")]
     internal static void VerifyRestrictedAccess(
         FileSystemSecurity security,
         SecurityIdentifier owner,
@@ -253,9 +256,10 @@ internal sealed class SqliteStorageGuard : IDisposable
     internal static SafeFileHandle OpenHandle(string path, bool isDirectory)
     {
         uint flags = FileFlagOpenReparsePoint | (isDirectory ? FileFlagBackupSemantics : 0);
+        // Attribute-only file handles do not enforce the delete-sharing restriction.
         SafeFileHandle handle = CreateFile(
             path,
-            FileReadAttributes,
+            FileReadAttributes | (isDirectory ? 0 : FileReadData),
             FileShareRead | FileShareWrite,
             IntPtr.Zero,
             OpenExisting,
