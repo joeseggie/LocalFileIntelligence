@@ -29,7 +29,8 @@ public static class SqliteMigrationRunner
     internal static async Task ApplyAsync(
         SqliteConnectionFactory factory,
         IReadOnlyList<SqliteMigrationDefinition> migrations,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<CancellationToken, Task>? afterMigrationSql = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ValidateMigrations(migrations);
@@ -86,6 +87,10 @@ public static class SqliteMigrationRunner
             cancellationToken.ThrowIfCancellationRequested();
             await ExecuteNonQueryAsync(connection, transaction, migration.Definition.Sql, cancellationToken)
                 .ConfigureAwait(false);
+            if (afterMigrationSql is not null)
+            {
+                await afterMigrationSql(cancellationToken).ConfigureAwait(false);
+            }
 
             await using SqliteCommand insert = connection.CreateCommand();
             insert.Transaction = transaction;
@@ -264,7 +269,7 @@ public static class SqliteMigrationRunner
         IReadOnlyList<AppliedMigration> applied,
         IReadOnlyList<SqliteMigrationDefinition> migrations)
     {
-        if (applied.Count > migrations.Count)
+        if (applied.Count > migrations.Count || applied.Any(migration => migration.Version > migrations.Count))
         {
             throw new InvalidOperationException("The database schema is newer than this application supports.");
         }

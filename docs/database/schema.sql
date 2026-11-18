@@ -1,4 +1,4 @@
--- Initial-release design snapshot. Phase 1 implements the migration engine separately.
+-- Initial-release design snapshot. Phase 1 applies the immutable initial schema migration.
 PRAGMA foreign_keys = ON;
 BEGIN IMMEDIATE;
 
