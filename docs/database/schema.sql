@@ -175,7 +175,7 @@ CREATE INDEX jobs_ready ON index_jobs(status, next_attempt_at, priority);
 
 CREATE TRIGGER root_content_disabled
 AFTER UPDATE OF enabled, status ON index_roots
-WHEN NEW.enabled = 0 OR NEW.status = 'access_denied'
+WHEN NEW.enabled = 0 OR NEW.status IN ('offline', 'access_denied')
 BEGIN
     DELETE FROM file_contents WHERE file_id IN (SELECT id FROM file_entries WHERE root_id = NEW.id);
     UPDATE file_entries SET extraction_status = 'pending'

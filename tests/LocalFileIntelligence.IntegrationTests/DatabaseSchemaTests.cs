@@ -27,6 +27,7 @@ public sealed class DatabaseSchemaTests
     [InlineData("UPDATE file_entries SET is_deleted = 1, deleted_at = '2026-01-01T00:00:01.000Z' WHERE id = 1;")]
     [InlineData("UPDATE file_entries SET extraction_status = 'failed' WHERE id = 1;")]
     [InlineData("UPDATE index_roots SET status = 'access_denied' WHERE id = 1;")]
+    [InlineData("UPDATE index_roots SET status = 'offline' WHERE id = 1;")]
     [InlineData("UPDATE index_roots SET enabled = 0 WHERE id = 1;")]
     public void RevisionOrAccessChangeInvalidatesCachedContent(string change)
     {
