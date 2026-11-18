@@ -13,5 +13,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\LocalFileIntelligence.Storage\LocalFileIntelligence.Storage.csproj" />
     <None Include="..\..\docs\database\schema.sql" Link="Fixtures\schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\src\LocalFileIntelligence.Storage\Migrations\Lfi015FileContentsFts.sql"
+      Link="Fixtures\Lfi015FileContentsFts.sql"
+      CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
