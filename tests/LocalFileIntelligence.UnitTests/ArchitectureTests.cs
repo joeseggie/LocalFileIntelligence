@@ -37,7 +37,8 @@ public sealed class ArchitectureTests
             foreach (XElement reference in projects[project].Descendants("ProjectReference"))
             {
                 string path = reference.Attribute("Include")?.Value ?? throw new InvalidDataException("Missing project reference.");
-                pending.Enqueue(Path.GetFileNameWithoutExtension(path));
+                string normalizedPath = path.Replace('\\', Path.DirectorySeparatorChar);
+                pending.Enqueue(Path.GetFileNameWithoutExtension(normalizedPath));
             }
         }
     }

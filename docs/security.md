@@ -72,6 +72,14 @@ Resolve a per-owner, non-roaming data directory, reject synchronized/reparse sto
 and restrict the directory plus DB/WAL/SHM/log/backup files before writing. Fail closed
 if safe ACLs cannot be established. Never rely on `.gitignore` as a security control.
 
+The LFI-010 connection factory currently restricts Windows storage to the current
+owner's Local Application Data directory, rejects known sync roots exposed through
+standard environment variables, verifies the owner/DACL on the data directory and
+existing database sidecars, and pins directory/database identities while the factory
+is alive. This does not identify arbitrary or unregistered sync software. A future
+owner-enrollment location policy must establish that property before the service relies
+on this factory for a production index; a local path alone is not proof of non-sync.
+
 Use cryptographically random client capabilities, store only their hashes in SQLite,
 and protect the per-client local credential with owner-scoped DPAPI. Do not put the
 secret in an MCP command line or check it into a client example. Owner-level malware

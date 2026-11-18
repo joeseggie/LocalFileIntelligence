@@ -4,17 +4,23 @@ Local-first Windows file indexing and AI-agent intelligence, targeting **Windows
 .NET 10, WinUI 3, SQLite + FTS5, a Windows Service, and multiple MCP-compatible agents**.
 Only explicitly selected folders are indexed; application processing stays local.
 
-## Current state: Phase 0
+## Current state: Phase 0 complete; LFI-010 implemented
 
 The engineering foundation contains the nine source projects, three test projects,
 central package management, CI, agent instructions, 15 ADRs, an executable initial
-database design, MCP contracts, and the LFI implementation backlog.
+database design, MCP contracts, and the LFI implementation backlog. LFI-010 adds a
+Storage-owned SQLite connection factory with one serialized writer, bounded read-only
+readers, cancellable leases, and verified connection settings. On Windows, it validates
+the data location and owner-restricted access, and pins storage identities while the
+factory is alive.
 
-**The working local index is not implemented yet.** No service is installed, no
-personal folders are scanned, and no desktop UI or MCP endpoint is active. Most
-projects establish boundaries only. `WindowsService` currently offers a safe,
-configuration-only command; `McpServer` fails explicitly until Phase 8 is implemented.
-The Desktop project is a boundary-only Windows library; WinUI/MVVM/tray work is Phase 6.
+**The working local index is not implemented yet.** The connection factory is not wired
+into `WindowsService`; migrations, repositories, and indexing are not implemented. No
+service is installed, no personal folders are scanned, and no desktop UI or MCP endpoint
+is active. Most projects establish boundaries only. `WindowsService` currently offers a
+safe, configuration-only command; `McpServer` fails explicitly until Phase 8 is
+implemented. The Desktop project is a boundary-only Windows library; WinUI/MVVM/tray
+work is Phase 6.
 
 ## Build and run the safe starter
 
@@ -53,9 +59,9 @@ The initial bootstrap establishes `main`. Subsequent work follows **issue -> sma
 plan -> feature branch -> implementation -> tests -> review -> PR -> merge**.
 Do not generate the entire application in one pass.
 
-The next vertical slice is **LFI-010: SQLite connection factory**, followed by
-**LFI-011: migration infrastructure**. The first product milestone is a working
-local index through the service and desktop, not an AI demo; its criteria remain open.
+The next vertical slice is **LFI-011: migration infrastructure**. The first product
+milestone is a working local index through the service and desktop, not an AI demo; its
+criteria remain open.
 
 ```powershell
 gh issue list --repo joeseggie/LocalFileIntelligence --state open
@@ -64,7 +70,7 @@ copilot
 
 Suggested prompt:
 
-> Implement LFI-010 only. Read AGENTS.md, the issue, docs/database-design.md, and
+> Implement LFI-011 only. Read AGENTS.md, the issue, docs/database-design.md, and
 > ADR-004. Inspect the existing projects, propose a small plan, and work on a feature
 > branch. Add focused tests and report changed files, validation, and unresolved risks.
 > Do not install the service, index my folders, or implement later issues.
