@@ -87,6 +87,19 @@ BEGIN
     SELECT RAISE(ABORT, 'content requires a current authorized file revision');
 END;
 
+CREATE TRIGGER content_update_requires_current_file
+BEFORE UPDATE ON file_contents
+WHEN NOT EXISTS (
+    SELECT 1 FROM file_entries f JOIN index_roots r ON r.id = f.root_id
+    WHERE f.id = NEW.file_id AND f.revision = NEW.file_revision
+      AND f.entry_type = 'file' AND f.is_deleted = 0
+      AND f.indexing_status = 'indexed' AND f.extraction_status = 'extracted'
+      AND r.enabled = 1 AND r.status NOT IN ('offline', 'access_denied')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'content requires a current authorized file revision');
+END;
+
 CREATE VIRTUAL TABLE file_contents_fts USING fts5(
     extracted_text,
     content = 'file_contents',

@@ -83,7 +83,7 @@ public sealed class SqliteMigrationRunnerTests
             ?? throw new InvalidOperationException($"Embedded migration resource '{resourceName}' was not found.");
 
         Assert.Equal(
-            "e94581e0b4fa6072a1b7660bd42ee646aae0ddafd2d70b5ff205641a751c46f0",
+            "002e7056d0b1dce8eeb2b0c5d4160bc49285ee6228b141d584c8c5b8b34aba0b",
             Convert.ToHexStringLower(SHA256.HashData(migration)));
     }
 
