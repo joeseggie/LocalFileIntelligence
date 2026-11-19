@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using Microsoft.Data.Sqlite;
 
@@ -17,6 +20,8 @@ public static class SqliteMigrationRunner
         ) STRICT;
         """;
     private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> MigrationGates = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     public static Task ApplyAsync(
         SqliteConnectionFactory factory,
@@ -30,11 +35,13 @@ public static class SqliteMigrationRunner
         SqliteConnectionFactory factory,
         IReadOnlyList<SqliteMigrationDefinition> migrations,
         CancellationToken cancellationToken = default,
-        Func<CancellationToken, Task>? afterMigrationSql = null)
+        Func<CancellationToken, Task>? afterMigrationSql = null,
+        Func<CancellationToken, Task>? afterBackupStep = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ValidateMigrations(migrations);
 
+        using MigrationLease migrationLease = AcquireMigrationLease(factory, cancellationToken);
         await using SqliteConnectionLease lease = await factory.OpenWriterAsync(cancellationToken)
             .ConfigureAwait(false);
         SqliteConnection connection = lease.Connection;
@@ -79,7 +86,8 @@ public static class SqliteMigrationRunner
                 factory,
                 applied[^1].Version,
                 pending[^1].Definition.Version,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                afterBackupStep).ConfigureAwait(false);
         }
 
         foreach (PendingMigration migration in pending)
@@ -109,6 +117,20 @@ public static class SqliteMigrationRunner
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static MigrationLease AcquireMigrationLease(
+        SqliteConnectionFactory factory,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        SemaphoreSlim gate = MigrationGates.GetOrAdd(factory.DatabasePath, static _ => new SemaphoreSlim(1, 1));
+        if (!gate.Wait(0))
+        {
+            throw new InvalidOperationException("A migration is already in progress for this database.");
+        }
+
+        return new MigrationLease(gate);
     }
 
     private static IReadOnlyList<SqliteMigrationDefinition> LoadMigrations()
@@ -188,7 +210,7 @@ public static class SqliteMigrationRunner
         command.CommandText =
             """
             SELECT count(*) FROM sqlite_master
-            WHERE name NOT LIKE 'sqlite_%' AND name <> $ledger
+            WHERE substr(name, 1, 7) <> 'sqlite_' AND name <> $ledger
               AND type IN ('table', 'index', 'view', 'trigger');
             """;
         command.Parameters.AddWithValue("$ledger", LedgerTable);
@@ -205,7 +227,7 @@ public static class SqliteMigrationRunner
         command.CommandText =
             """
             SELECT count(*) FROM sqlite_master
-            WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'view', 'trigger');
+            WHERE substr(name, 1, 7) <> 'sqlite_' AND type IN ('table', 'index', 'view', 'trigger');
             """;
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
     }
@@ -295,7 +317,8 @@ public static class SqliteMigrationRunner
         SqliteConnectionFactory factory,
         int fromVersion,
         int toVersion,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? afterBackupStep = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string backupPath = $"{factory.DatabasePath}.pre-upgrade-{fromVersion}-to-{toVersion}-{Guid.NewGuid():N}.bak";
@@ -307,21 +330,124 @@ public static class SqliteMigrationRunner
             Mode = SqliteOpenMode.ReadWriteCreate,
             Pooling = false,
         };
-        await using SqliteConnection destination = new(destinationString.ToString());
         try
         {
+            CreateRestrictedBackupFile(backupPath);
+            await using SqliteConnection destination = new(destinationString.ToString());
             await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
-            reader.Connection.BackupDatabase(destination);
+            await CopyDatabaseInStepsAsync(reader.Connection, destination, cancellationToken, afterBackupStep)
+                .ConfigureAwait(false);
         }
         catch
         {
-            await destination.DisposeAsync().ConfigureAwait(false);
             if (File.Exists(backupPath))
             {
                 File.Delete(backupPath);
             }
 
             throw;
+        }
+    }
+
+    private static void CreateRestrictedBackupFile(string backupPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            CreateRestrictedWindowsBackupFile(backupPath);
+            return;
+        }
+
+        using FileStream file = new(backupPath, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.Read,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        });
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void CreateRestrictedWindowsBackupFile(string backupPath)
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier owner = identity.User
+            ?? throw new UnauthorizedAccessException("The current Windows owner SID could not be determined.");
+        SecurityIdentifier system = new(WellKnownSidType.LocalSystemSid, null);
+        SecurityIdentifier administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
+        FileSecurity security = new();
+        security.SetOwner(owner);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(owner, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            administrators,
+            FileSystemRights.FullControl,
+            AccessControlType.Allow));
+
+        using (FileStream file = new(backupPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read))
+        {
+            new FileInfo(backupPath).SetAccessControl(security);
+        }
+
+        FileSecurity actualSecurity = new FileInfo(backupPath).GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        SqliteStorageGuard.VerifyRestrictedAccess(actualSecurity, owner, identity.Owner);
+    }
+
+    private static async Task CopyDatabaseInStepsAsync(
+        SqliteConnection source,
+        SqliteConnection destination,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? afterBackupStep)
+    {
+        const int pagesPerStep = 128;
+        const int maxBusyRetries = 50;
+        const int busyRetryDelayMilliseconds = 100;
+        const int sqliteOk = 0;
+        const int sqliteBusy = 5;
+        const int sqliteLocked = 6;
+        const int sqliteDone = 101;
+        SQLitePCL.sqlite3_backup backup = SQLitePCL.raw.sqlite3_backup_init(
+            destination.Handle,
+            "main",
+            source.Handle,
+            "main")
+            ?? throw new InvalidOperationException("SQLite could not initialize the pre-upgrade backup.");
+        try
+        {
+            int busyRetries = 0;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int result = SQLitePCL.raw.sqlite3_backup_step(backup, pagesPerStep);
+                if (result == sqliteDone)
+                {
+                    return;
+                }
+
+                if (result == sqliteOk)
+                {
+                    busyRetries = 0;
+                    if (afterBackupStep is not null)
+                    {
+                        await afterBackupStep(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
+                if (result is sqliteBusy or sqliteLocked && busyRetries++ < maxBusyRetries)
+                {
+                    await Task.Delay(busyRetryDelayMilliseconds, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                SqliteException.ThrowExceptionForRC(result, destination.Handle);
+            }
+        }
+        finally
+        {
+            SQLitePCL.raw.sqlite3_backup_finish(backup);
         }
     }
 
@@ -347,4 +473,14 @@ public static class SqliteMigrationRunner
     private sealed record AppliedMigration(int Version, string Name, string Checksum);
 
     private sealed record PendingMigration(SqliteMigrationDefinition Definition, string Checksum);
+
+    private sealed class MigrationLease(SemaphoreSlim gate) : IDisposable
+    {
+        private SemaphoreSlim? _gate = gate;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _gate, null)?.Release();
+        }
+    }
 }

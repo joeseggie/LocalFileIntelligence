@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using LocalFileIntelligence.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -117,6 +120,50 @@ public sealed class SqliteMigrationRunnerTests
         Assert.Equal(0, await ScalarAsync<long>(backup, "SELECT count(*) FROM sqlite_master WHERE name = 'data_v2';"));
     }
 
+    [SqliteConnectionFactoryTests.WindowsFact]
+    [SupportedOSPlatform("windows")]
+    public async Task UpgradeBackupHasRestrictedAclWhenDirectoryDoesNotInheritPermissions()
+    {
+        using TemporaryDirectory directory = new();
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier owner = identity.User
+            ?? throw new InvalidOperationException("The current Windows owner SID could not be determined.");
+        DirectorySecurity directorySecurity = new();
+        directorySecurity.SetOwner(owner);
+        directorySecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (SecurityIdentifier sid in new[]
+                 {
+                     owner,
+                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                     new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                 })
+        {
+            directorySecurity.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        new DirectoryInfo(directory.Path).SetAccessControl(directorySecurity);
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        SqliteMigrationRunner.SqliteMigrationDefinition[] migrations =
+        [
+            Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);"),
+            Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);"),
+        ];
+
+        await SqliteMigrationRunner.ApplyAsync(factory, [migrations[0]]);
+        await SqliteMigrationRunner.ApplyAsync(factory, migrations);
+
+        string backupPath = Assert.Single(Directory.GetFiles(directory.Path, "index.db.pre-upgrade-1-to-2-*.bak"));
+        FileSecurity backupSecurity = new FileInfo(backupPath).GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        Assert.True(backupSecurity.AreAccessRulesProtected);
+        SqliteStorageGuard.VerifyRestrictedAccess(backupSecurity, owner, identity.Owner);
+    }
+
     [Fact]
     public async Task FailedMigrationRollsBackAndCanBeReopened()
     {
@@ -177,7 +224,7 @@ public sealed class SqliteMigrationRunnerTests
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
         await using (SqliteConnectionLease writer = await factory.OpenWriterAsync())
         {
-            await ExecuteAsync(writer.Connection, "CREATE TABLE unknown_data (value TEXT);");
+            await ExecuteAsync(writer.Connection, "CREATE TABLE sqliteX (value TEXT);");
         }
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => SqliteMigrationRunner.ApplyAsync(factory));
@@ -185,7 +232,35 @@ public sealed class SqliteMigrationRunnerTests
         await using SqliteConnectionLease reader = await factory.OpenReaderAsync();
         Assert.Equal(1, await ScalarAsync<long>(
             reader.Connection,
-            "SELECT count(*) FROM sqlite_master WHERE name = 'unknown_data';"));
+            "SELECT count(*) FROM sqlite_master WHERE name = 'sqliteX';"));
+    }
+
+    [Fact]
+    public async Task RejectsLiteralSqlitePrefixNearMatchWithEmptyLedger()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        await using (SqliteConnectionLease writer = await factory.OpenWriterAsync())
+        {
+            await ExecuteAsync(
+                writer.Connection,
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY CHECK (version > 0),
+                    name TEXT NOT NULL UNIQUE,
+                    sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+                    applied_at TEXT NOT NULL CHECK (applied_at GLOB '????-??-??T??:??:??.???Z')
+                ) STRICT;
+                CREATE TABLE sqliteX (value TEXT);
+                """);
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => SqliteMigrationRunner.ApplyAsync(factory));
+
+        await using SqliteConnectionLease reader = await factory.OpenReaderAsync();
+        Assert.Equal(1, await ScalarAsync<long>(
+            reader.Connection,
+            "SELECT count(*) FROM sqlite_master WHERE name = 'sqliteX';"));
     }
 
     [Fact]
@@ -215,7 +290,10 @@ public sealed class SqliteMigrationRunnerTests
     public async Task ProcessCrashDuringMigrationRecoversOnReopen()
     {
         using TemporaryDirectory directory = new();
-        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);");
+        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(
+            1,
+            "one",
+            "CREATE TABLE data_v1 (value TEXT); INSERT INTO data_v1 VALUES ('preserved');");
         SqliteMigrationRunner.SqliteMigrationDefinition second = Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);");
         using (SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path))
         {
@@ -252,9 +330,23 @@ public sealed class SqliteMigrationRunnerTests
         _ = await standardError;
 
         using SqliteConnectionFactory reopened = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        await using (SqliteConnectionLease recovered = await reopened.OpenReaderAsync())
+        {
+            Assert.Equal(1, await ScalarAsync<long>(
+                recovered.Connection,
+                "SELECT count(*) FROM schema_migrations;"));
+            Assert.Equal("preserved", await ScalarAsync<string>(
+                recovered.Connection,
+                "SELECT value FROM data_v1;"));
+            Assert.Equal(0, await ScalarAsync<long>(
+                recovered.Connection,
+                "SELECT count(*) FROM sqlite_master WHERE name = 'data_v2';"));
+        }
+
         await SqliteMigrationRunner.ApplyAsync(reopened, [first, second]);
         await using SqliteConnectionLease reader = await reopened.OpenReaderAsync();
         Assert.Equal(2, await ScalarAsync<long>(reader.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal("preserved", await ScalarAsync<string>(reader.Connection, "SELECT value FROM data_v1;"));
         Assert.Equal(1, await ScalarAsync<long>(
             reader.Connection,
             "SELECT count(*) FROM sqlite_master WHERE name = 'data_v2';"));
@@ -270,7 +362,10 @@ public sealed class SqliteMigrationRunnerTests
             return;
         }
 
-        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);");
+        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(
+            1,
+            "one",
+            "CREATE TABLE data_v1 (value TEXT); INSERT INTO data_v1 VALUES ('preserved');");
         SqliteMigrationRunner.SqliteMigrationDefinition second = Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);");
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory);
         await SqliteMigrationRunner.ApplyAsync(
@@ -296,6 +391,55 @@ public sealed class SqliteMigrationRunnerTests
 
         transaction.Rollback();
         await SqliteMigrationRunner.ApplyAsync(migrationFactory);
+    }
+
+    [Fact]
+    public async Task OverlappingMigrationsInOneFactoryFailImmediately()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        await AssertOverlappingMigrationFailsAsync(factory, factory);
+    }
+
+    [Fact]
+    public async Task OverlappingMigrationsAcrossFactoriesFailImmediately()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory firstFactory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        using SqliteConnectionFactory secondFactory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        await AssertOverlappingMigrationFailsAsync(firstFactory, secondFactory);
+    }
+
+    [Fact]
+    public async Task CancellingBackupRemovesPartialFileAndReleasesWriterLease()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(
+            1,
+            "one",
+            """
+            CREATE TABLE data_v1 (value BLOB);
+            WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < 200)
+            INSERT INTO data_v1 SELECT zeroblob(4000) FROM sequence;
+            """);
+        SqliteMigrationRunner.SqliteMigrationDefinition second = Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);");
+        await SqliteMigrationRunner.ApplyAsync(factory, [first]);
+        using CancellationTokenSource cancellation = new();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => SqliteMigrationRunner.ApplyAsync(
+                factory,
+                [first, second],
+                cancellation.Token,
+                afterBackupStep: _ =>
+                {
+                    cancellation.Cancel();
+                    return Task.CompletedTask;
+                }));
+
+        Assert.Empty(Directory.GetFiles(directory.Path, "index.db.pre-upgrade-1-to-2-*.bak"));
+        await SqliteMigrationRunner.ApplyAsync(factory, [first, second]);
     }
 
     [Fact]
@@ -335,13 +479,44 @@ public sealed class SqliteMigrationRunnerTests
             ?? throw new InvalidOperationException("The migration crash helper process could not be started.");
     }
 
+    private static async Task AssertOverlappingMigrationFailsAsync(
+        SqliteConnectionFactory firstFactory,
+        SqliteConnectionFactory secondFactory)
+    {
+        SqliteMigrationRunner.SqliteMigrationDefinition migration =
+            Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);");
+        TaskCompletionSource<bool> migrationReachedSql = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> continueMigration = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task firstMigration = SqliteMigrationRunner.ApplyAsync(
+            firstFactory,
+            [migration],
+            afterMigrationSql: async cancellationToken =>
+            {
+                migrationReachedSql.TrySetResult(true);
+                await continueMigration.Task.WaitAsync(cancellationToken);
+            });
+        await migrationReachedSql.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => SqliteMigrationRunner.ApplyAsync(secondFactory, [migration]));
+        }
+        finally
+        {
+            continueMigration.TrySetResult(true);
+        }
+
+        await firstMigration.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     private static async Task<string[]> GetObjectNamesAsync(SqliteConnection connection)
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText =
             """
             SELECT type || ':' || name FROM sqlite_master
-            WHERE name NOT LIKE 'sqlite_%'
+            WHERE substr(name, 1, 7) <> 'sqlite_'
             ORDER BY type, name;
             """;
         await using SqliteDataReader reader = await command.ExecuteReaderAsync();
