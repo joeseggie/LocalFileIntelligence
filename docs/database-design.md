@@ -2,7 +2,9 @@
 
 Status: proposed initial-release schema, executable as a Phase 0 design test.
 `database/schema.sql` is normative. Phase 1 implements the actual connection factory,
-checksummed SQL migrations, repositories, and on-disk recovery tests.
+checksummed SQL migrations, repositories, and on-disk recovery tests. LFI-011 adds the
+opt-in migration runner and its immutable initial-schema migration; service startup does
+not invoke it yet.
 
 ## Data dictionary
 
@@ -74,15 +76,19 @@ and database handles to prevent replacement while it is in use. It cannot detect
 arbitrary unregistered sync software; service enrollment must add a trusted per-owner
 location policy before claiming that such locations are excluded.
 
-Migrations are ordered, immutable, and SHA-256 checksummed. Obtain the exclusive
-migration lease, back up through SQLite's backup API, and apply each migration plus its
-ledger row transactionally. Refuse gaps, checksum mismatch, and unsupported newer
-versions. Never reset a database to hide failure.
+Migrations are ordered, immutable, and SHA-256 checksummed over their UTF-8 SQL.
+`schema_migrations` is owned by the runner. It takes the serialized writer lease, makes
+a same-directory SQLite backup before upgrading a database with an applied version, and
+applies pending migration SQL and ledger rows in a transaction. Backup failure,
+version gaps, checksum mismatch, unknown schema objects, corruption, and unsupported
+newer versions fail without resetting the database. Backups are retained; cleanup and
+retention policy are not implemented.
 
-The snapshot is not run at every application startup. Phase 1 splits it into ordered
-migrations and validates fresh/repeat/upgrade/rollback/concurrent-open/crash-reopen
-scenarios on actual temporary files. In-memory design tests do not prove WAL or
-production migrations.
+The embedded initial migration matches the design snapshot (the runner creates the
+ledger table); integration tests compare their schema objects and exercise fresh/repeat/
+upgrade/rollback/reopen/concurrent-lock cases on actual temporary files. In-memory
+design tests do not prove WAL or production migrations. The runner is not wired into
+service startup.
 
 ## Transaction invariants
 
