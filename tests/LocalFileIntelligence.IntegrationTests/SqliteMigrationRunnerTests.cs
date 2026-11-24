@@ -324,8 +324,13 @@ public sealed class SqliteMigrationRunnerTests
                 $"Migration crash helper did not reach its transaction. stdout: {output} stderr: {error}");
         }
 
+        int helperProcessId = int.Parse(
+            await File.ReadAllTextAsync(markerPath),
+            System.Globalization.CultureInfo.InvariantCulture);
+        using Process helper = Process.GetProcessById(helperProcessId);
         child.Kill(entireProcessTree: true);
         await child.WaitForExitAsync();
+        await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
         _ = await standardOutput;
         _ = await standardError;
 
@@ -373,7 +378,10 @@ public sealed class SqliteMigrationRunnerTests
             [first, second],
             afterMigrationSql: async cancellationToken =>
             {
-                await File.WriteAllTextAsync(markerPath, "ready", cancellationToken);
+                await File.WriteAllTextAsync(
+                    markerPath,
+                    Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    cancellationToken);
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             });
     }
