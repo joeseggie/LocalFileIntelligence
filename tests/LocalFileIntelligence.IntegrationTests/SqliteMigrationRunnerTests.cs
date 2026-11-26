@@ -378,10 +378,12 @@ public sealed class SqliteMigrationRunnerTests
             [first, second],
             afterMigrationSql: async cancellationToken =>
             {
+                string temporaryMarkerPath = markerPath + ".tmp";
                 await File.WriteAllTextAsync(
-                    markerPath,
+                    temporaryMarkerPath,
                     Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     cancellationToken);
+                File.Move(temporaryMarkerPath, markerPath);
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             });
     }
