@@ -68,6 +68,106 @@ public sealed class SqliteIndexRootRepositoryTests
         Assert.Single(await repository.ListAsync());
     }
 
+    [Theory]
+    [InlineData(true, IndexRootStatus.Offline)]
+    [InlineData(false, IndexRootStatus.Paused)]
+    public async Task FailedStateInvalidationRollsBackAllChanges(bool enabled, IndexRootStatus status)
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        SqliteIndexRootRepository repository = new(factory);
+        IndexRoot added = await repository.AddAsync(CreateRegistration());
+        IndexRoot root = Assert.IsType<IndexRoot>(
+            await repository.UpdateStateAsync(added.Id, enabled: true, IndexRootStatus.Ready, added.CreatedAt));
+        string leaseUntil = UtcTimestamp.Format(root.CreatedAt.AddMinutes(1));
+
+        await using (SqliteConnectionLease lease = await factory.OpenWriterAsync())
+        {
+            await ExecuteAsync(
+                lease.Connection,
+                """
+                INSERT INTO file_entries (root_id, relative_path, path_key, parent_path_key, name, extension,
+                                          entry_type, size_bytes, created_at_fs, modified_at_fs, last_seen_at,
+                                          extraction_status, indexing_status)
+                VALUES ($root_id, 'note.txt', 'NOTE.TXT', '', 'note.txt', '.txt', 'file', 4,
+                        $timestamp, $timestamp, $timestamp, 'extracted', 'indexed');
+                INSERT INTO file_contents
+                VALUES (last_insert_rowid(), 1, 'data', 'plain-text', '1', $timestamp, 4);
+                INSERT INTO index_jobs (root_id, job_type, dedupe_key, status, created_at, next_attempt_at,
+                                        expected_policy_revision, started_at, lease_owner, lease_until)
+                VALUES ($root_id, 'scan', 'queued-scan', 'queued', $timestamp, $timestamp,
+                        $revision, NULL, NULL, NULL),
+                       ($root_id, 'scan', 'running-scan', 'running', $timestamp, $timestamp,
+                        $revision, $timestamp, 'worker-1', $lease_until);
+                CREATE TRIGGER fail_job_cancellation
+                BEFORE UPDATE OF status ON index_jobs
+                WHEN NEW.status = 'cancelled'
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic invalidation failure');
+                END;
+                """,
+                ("$root_id", root.Id),
+                ("$timestamp", UtcTimestamp.Format(root.CreatedAt)),
+                ("$revision", root.PolicyRevision),
+                ("$lease_until", leaseUntil));
+        }
+
+        SqliteException exception = await Assert.ThrowsAsync<SqliteException>(() => repository.UpdateStateAsync(
+            root.Id, enabled, status, root.CreatedAt.AddMinutes(1)));
+
+        Assert.Contains("synthetic invalidation failure", exception.Message);
+        Assert.Equal(root, await repository.GetByIdAsync(root.Id));
+        Assert.Equal("data", await ScalarTextAsync(factory, "SELECT extracted_text FROM file_contents;"));
+        Assert.Equal("extracted", await ScalarTextAsync(factory, "SELECT extraction_status FROM file_entries;"));
+        Assert.Equal(1, await ScalarAsync(factory,
+            "SELECT count(*) FROM index_jobs WHERE status = 'queued' AND completed_at IS NULL AND lease_owner IS NULL AND lease_until IS NULL;"));
+        Assert.Equal(1, await ScalarAsync(factory,
+            "SELECT count(*) FROM index_jobs WHERE status = 'running' AND completed_at IS NULL AND lease_owner = 'worker-1';"));
+        Assert.Equal(leaseUntil, await ScalarTextAsync(factory,
+            "SELECT lease_until FROM index_jobs WHERE status = 'running';"));
+    }
+
+    [Theory]
+    [InlineData("add")]
+    [InlineData("details")]
+    [InlineData("state")]
+    [InlineData("disable")]
+    [InlineData("remove")]
+    public async Task MutationWaitingForWriterLeaseHonorsCancellation(string operation)
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        SqliteIndexRootRepository repository = new(factory);
+        IndexRoot added = await repository.AddAsync(CreateRegistration());
+        IndexRoot root = Assert.IsType<IndexRoot>(
+            await repository.UpdateStateAsync(added.Id, enabled: true, IndexRootStatus.Ready, added.CreatedAt));
+        DateTimeOffset changedAt = root.CreatedAt.AddMinutes(1);
+
+        await using (SqliteConnectionLease writer = await factory.OpenWriterAsync())
+        {
+            using CancellationTokenSource cancellation = new();
+            Task mutation = operation switch
+            {
+                "add" => repository.AddAsync(CreateRegistration(path: @"C:\OtherSynthetic"), cancellation.Token),
+                "details" => repository.UpdateDetailsAsync(root.Id, "Renamed root", changedAt, cancellation.Token),
+                "state" => repository.UpdateStateAsync(
+                    root.Id, enabled: true, IndexRootStatus.Offline, changedAt, cancellation.Token),
+                "disable" => repository.UpdateStateAsync(
+                    root.Id, enabled: false, IndexRootStatus.Paused, changedAt, cancellation.Token),
+                "remove" => repository.RemoveAsync(root.Id, cancellation.Token),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+            };
+
+            Assert.False(mutation.IsCompleted);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => mutation.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        Assert.Equal(root, await repository.GetByIdAsync(root.Id));
+        Assert.Single(await repository.ListAsync());
+    }
+
     [Fact]
     public async Task DetailsAndStateUpdatesAreTransactionalAndIdempotent()
     {
