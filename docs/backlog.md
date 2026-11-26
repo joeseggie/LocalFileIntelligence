@@ -4,9 +4,10 @@ The authoritative issue definitions are in `backlog.json`: stable LFI IDs, phase
 scope, dependencies, and issue-specific acceptance criteria. GitHub issues use those
 IDs in their titles. Numbering is not a dependency; follow each `dependsOn` list.
 
-**Phase 0 is complete, and LFI-010 (SQLite connection factory) is implemented.**
-The rest of Phase 1 and all later phases remain open; the connection factory does not
-provide migrations, repositories, service integration, or indexing. The first product
+**Phase 0 is complete; LFI-010 (SQLite connection factory), LFI-011 (migration
+infrastructure), and LFI-012 (root persistence) are implemented.** The rest of Phase 1
+and all later phases remain open. Root persistence is not wired into service
+enrollment; it does not verify selected folders or start indexing. The first product
 milestone is a working local index through Phases 1-6; it is not the engineering
 scaffold and is not an AI demo.
 
@@ -57,5 +58,5 @@ belong only to Phase 10. Mutating operations require a future approval-workflow 
 the reserved table is not an executor. Locality declarations are visible but not proof
 that an external agent/model stays local.
 
-The next implementation starts with **LFI-011**. Persistence and recovery precede
+The next implementation starts with **LFI-013**. Persistence and recovery precede
 crawling; real authorization precedes exposing agent tools.
