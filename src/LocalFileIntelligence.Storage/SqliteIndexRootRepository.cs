@@ -205,6 +205,20 @@ public sealed class SqliteIndexRootRepository : IIndexRootRepository
             await InvalidateRootDataAsync(connection, transaction, id, timestamp, cancellationToken)
                 .ConfigureAwait(false);
         }
+        else if (status == IndexRootStatus.Paused)
+        {
+            await using SqliteCommand cancelJobs = connection.CreateCommand();
+            cancelJobs.Transaction = transaction;
+            cancelJobs.CommandText =
+                """
+                UPDATE index_jobs
+                SET status = 'cancelled', completed_at = $updated_at, lease_owner = NULL, lease_until = NULL
+                WHERE root_id = $root_id AND status IN ('queued', 'running');
+                """;
+            cancelJobs.Parameters.AddWithValue("$root_id", id);
+            cancelJobs.Parameters.AddWithValue("$updated_at", timestamp);
+            await cancelJobs.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         IndexRoot root = await GetByIdAsync(connection, transaction, id, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The updated root could not be read back.");
