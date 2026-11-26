@@ -4,7 +4,7 @@ Local-first Windows file indexing and AI-agent intelligence, targeting **Windows
 .NET 10, WinUI 3, SQLite + FTS5, a Windows Service, and multiple MCP-compatible agents**.
 Only explicitly selected folders are indexed; application processing stays local.
 
-## Current state: Phase 0 complete; LFI-010 implemented
+## Current state: Phase 0 complete; LFI-010 and LFI-011 implemented
 
 The engineering foundation contains the nine source projects, three test projects,
 central package management, CI, agent instructions, 15 ADRs, an executable initial
@@ -15,12 +15,12 @@ the data location and owner-restricted access, and pins storage identities while
 factory is alive.
 
 **The working local index is not implemented yet.** The connection factory is not wired
-into `WindowsService`; migrations, repositories, and indexing are not implemented. No
-service is installed, no personal folders are scanned, and no desktop UI or MCP endpoint
-is active. Most projects establish boundaries only. `WindowsService` currently offers a
-safe, configuration-only command; `McpServer` fails explicitly until Phase 8 is
-implemented. The Desktop project is a boundary-only Windows library; WinUI/MVVM/tray
-work is Phase 6.
+into `WindowsService`; the opt-in migration runner is not invoked at service startup.
+Repositories and indexing are not implemented. No service is installed, no personal
+folders are scanned, and no desktop UI or MCP endpoint is active. Most projects
+establish boundaries only. `WindowsService` currently offers a safe, configuration-only
+command; `McpServer` fails explicitly until Phase 8 is implemented. The Desktop project
+is a boundary-only Windows library; WinUI/MVVM/tray work is Phase 6.
 
 ## Build and run the safe starter
 
