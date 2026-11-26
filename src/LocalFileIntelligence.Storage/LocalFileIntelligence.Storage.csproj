@@ -6,4 +6,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="..\LocalFileIntelligence.Application\LocalFileIntelligence.Application.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations\0001_initial_schema.sql" LogicalName="LocalFileIntelligence.Storage.Migrations.0001_initial_schema.sql" />
+  </ItemGroup>
 </Project>

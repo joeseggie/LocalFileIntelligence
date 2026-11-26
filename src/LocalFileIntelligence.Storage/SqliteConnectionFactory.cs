@@ -5,6 +5,7 @@ namespace LocalFileIntelligence.Storage;
 public sealed class SqliteConnectionFactory : IDisposable
 {
     private const int BusyTimeoutMilliseconds = 5000;
+    private readonly string _databasePath;
     private readonly string _connectionString;
     private readonly string _readOnlyConnectionString;
     private readonly SemaphoreSlim _writerGate = new(1, 1);
@@ -15,6 +16,7 @@ public sealed class SqliteConnectionFactory : IDisposable
 
     private SqliteConnectionFactory(string databasePath, int maxReaders, SqliteStorageGuard storageGuard)
     {
+        _databasePath = databasePath;
         _storageGuard = storageGuard;
         _maxReaders = maxReaders;
         _connectionString = new SqliteConnectionStringBuilder
@@ -33,6 +35,8 @@ public sealed class SqliteConnectionFactory : IDisposable
         }.ToString();
         _readerGate = new SemaphoreSlim(maxReaders, maxReaders);
     }
+
+    internal string DatabasePath => _databasePath;
 
     public static async Task<SqliteConnectionFactory> CreateAsync(
         string dataDirectory,
