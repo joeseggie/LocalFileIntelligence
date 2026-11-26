@@ -310,6 +310,59 @@ public sealed class SqliteIndexRootRepositoryTests
     }
 
     [Fact]
+    public async Task PausingEnabledRootPreservesConsentAndContentAndCancelsJobs()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        SqliteIndexRootRepository repository = new(factory);
+        IndexRoot root = await repository.AddAsync(CreateRegistration());
+        root = Assert.IsType<IndexRoot>(
+            await repository.UpdateStateAsync(root.Id, enabled: true, IndexRootStatus.Ready, root.CreatedAt));
+        string leaseUntil = UtcTimestamp.Format(root.CreatedAt.AddMinutes(1));
+
+        await using (SqliteConnectionLease lease = await factory.OpenWriterAsync())
+        {
+            await ExecuteAsync(
+                lease.Connection,
+                """
+                INSERT INTO file_entries (root_id, relative_path, path_key, parent_path_key, name, extension,
+                                          entry_type, size_bytes, created_at_fs, modified_at_fs, last_seen_at,
+                                          extraction_status, indexing_status)
+                VALUES ($root_id, 'note.txt', 'NOTE.TXT', '', 'note.txt', '.txt', 'file', 4,
+                        $timestamp, $timestamp, $timestamp, 'extracted', 'indexed');
+                INSERT INTO file_contents
+                VALUES (last_insert_rowid(), 1, 'pausefixturetoken', 'plain-text', '1', $timestamp, 17);
+                INSERT INTO index_jobs (root_id, job_type, dedupe_key, status, created_at, next_attempt_at,
+                                        expected_policy_revision)
+                VALUES ($root_id, 'scan', 'queued-scan', 'queued', $timestamp, $timestamp, $revision);
+                INSERT INTO index_jobs (root_id, job_type, dedupe_key, status, created_at, started_at,
+                                        next_attempt_at, expected_policy_revision, lease_owner, lease_until)
+                VALUES ($root_id, 'scan', 'running-scan', 'running', $timestamp, $timestamp, $timestamp,
+                        $revision, 'worker-1', $lease_until);
+                """,
+                ("$root_id", root.Id),
+                ("$timestamp", UtcTimestamp.Format(root.CreatedAt)),
+                ("$revision", root.PolicyRevision),
+                ("$lease_until", leaseUntil));
+        }
+
+        IndexRoot paused = Assert.IsType<IndexRoot>(
+            await repository.UpdateStateAsync(root.Id, enabled: true, IndexRootStatus.Paused, root.CreatedAt.AddMinutes(1)));
+
+        Assert.True(paused.Enabled);
+        Assert.Equal(IndexRootStatus.Paused, paused.Status);
+        Assert.Equal(root.PolicyRevision, paused.PolicyRevision);
+        Assert.Equal(root.IndexRevision + 1, paused.IndexRevision);
+        Assert.Equal("pausefixturetoken", await ScalarTextAsync(factory, "SELECT extracted_text FROM file_contents;"));
+        Assert.Equal(1, await ScalarAsync(factory,
+            "SELECT count(*) FROM file_contents_fts WHERE file_contents_fts MATCH 'pausefixturetoken';"));
+        Assert.Equal(2, await ScalarAsync(factory,
+            "SELECT count(*) FROM index_jobs WHERE status = 'cancelled' AND completed_at IS NOT NULL;"));
+        Assert.Equal(0, await ScalarAsync(factory,
+            "SELECT count(*) FROM index_jobs WHERE status IN ('queued', 'running') OR lease_owner IS NOT NULL OR lease_until IS NOT NULL;"));
+    }
+
+    [Fact]
     public async Task RejectsMalformedPathTimestampAndStoredCalendarDate()
     {
         using TemporaryDirectory directory = new();
