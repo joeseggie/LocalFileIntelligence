@@ -66,6 +66,7 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
         cancellationToken.ThrowIfCancellationRequested();
         string parentPathKey = IndexEntryPath.NormalizeParentKey(parentRelativePath);
         string? afterPathKey = afterRelativePath is null ? null : IndexEntryPath.NormalizeKey(afterRelativePath);
+        string continuationPredicate = afterPathKey is null ? string.Empty : "AND path_key > $after_path_key";
 
         await using SqliteConnectionLease lease = await _connectionFactory.OpenReaderAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -77,13 +78,17 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
             WHERE root_id = $root_id
               AND parent_path_key = $parent_path_key
               AND is_deleted = 0
-              AND ($after_path_key IS NULL OR path_key > $after_path_key)
-            ORDER BY path_key, id
+              {continuationPredicate}
+            ORDER BY path_key
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$root_id", rootId);
         command.Parameters.AddWithValue("$parent_path_key", parentPathKey);
-        command.Parameters.AddWithValue("$after_path_key", (object?)afterPathKey ?? DBNull.Value);
+        if (afterPathKey is not null)
+        {
+            command.Parameters.AddWithValue("$after_path_key", afterPathKey);
+        }
+
         command.Parameters.AddWithValue("$limit", limit);
 
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -172,6 +177,14 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
             return null;
         }
 
+        if (existing.EntryType == IndexEntryType.Directory
+            && !string.Equals(existing.PathKey, normalized.PathKey, StringComparison.Ordinal)
+            && await HasDescendantsAsync(connection, transaction, rootId, existing.PathKey, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("Renaming a populated directory is not supported.");
+        }
+
         FileEntry renamed = await ApplyObservationAsync(
                 connection,
                 transaction,
@@ -230,6 +243,32 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
             ?? throw new InvalidOperationException("The tombstoned file entry could not be read back.");
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return tombstone;
+    }
+
+    private static async Task<bool> HasDescendantsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long rootId,
+        string pathKey,
+        CancellationToken cancellationToken)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM file_entries
+                WHERE root_id = $root_id
+                  AND length(path_key) > length($path_key)
+                  AND substr(path_key, 1, length($path_key) + 1) = ($path_key || '\')
+            );
+            """;
+        command.Parameters.AddWithValue("$root_id", rootId);
+        command.Parameters.AddWithValue("$path_key", pathKey);
+        return Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
     }
 
     private static async Task<FileEntry> ApplyObservationAsync(

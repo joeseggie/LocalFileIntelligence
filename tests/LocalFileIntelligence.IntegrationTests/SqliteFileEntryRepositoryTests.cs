@@ -84,6 +84,43 @@ public sealed class SqliteFileEntryRepositoryTests
     }
 
     [Fact]
+    public async Task RenameRejectsPopulatedDirectoryWithoutChangingDescendantsOrContent()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        long rootId = await AddReadyRootAsync(factory);
+        SqliteFileEntryRepository repository = new(factory);
+        FileEntry folder = await repository.UpsertAsync(rootId, Observation("Project", IndexEntryType.Directory, size: 0));
+        FileEntry child = await repository.UpsertAsync(rootId, Observation(@"Project\child.txt"));
+        await SetCurrentContentAsync(factory, child);
+        long rootRevision = await ScalarAsync(
+            factory,
+            "SELECT index_revision FROM index_roots WHERE id = $id;",
+            rootId);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => repository.RenameAsync(
+                rootId,
+                "Project",
+                Observation("Renamed", IndexEntryType.Directory, size: 0)));
+
+        FileEntry unchangedFolder = Assert.IsType<FileEntry>(
+            await repository.GetByPathAsync(rootId, "Project"));
+        FileEntry unchangedChild = Assert.IsType<FileEntry>(
+            await repository.GetByPathAsync(rootId, @"Project\child.txt"));
+        Assert.Equal(folder.Id, unchangedFolder.Id);
+        Assert.Equal(folder.Revision, unchangedFolder.Revision);
+        Assert.Equal(child.Id, unchangedChild.Id);
+        Assert.Equal(child.Revision, unchangedChild.Revision);
+        Assert.Single(await repository.ListChildrenAsync(rootId, "Project", null, 10));
+        Assert.Equal(1, await ScalarAsync(factory, "SELECT count(*) FROM file_contents;"));
+        Assert.Equal(rootRevision, await ScalarAsync(
+            factory,
+            "SELECT index_revision FROM index_roots WHERE id = $id;",
+            rootId));
+    }
+
+    [Fact]
     public async Task TombstonesAreIdempotentAndUpsertResurrectsStableEntry()
     {
         using TemporaryDirectory directory = new();
@@ -145,6 +182,31 @@ public sealed class SqliteFileEntryRepositoryTests
         Assert.Equal(2, rootChildren.Count);
         Assert.Equal(new[] { "Project" }, otherRootChildren.Select(entry => entry.Name));
         Assert.Equal(IndexEntryType.Directory, rootChildren.Single(entry => entry.Name == "Project").EntryType);
+
+        await using SqliteConnectionLease planLease = await factory.OpenReaderAsync();
+        await using SqliteCommand plan = planLease.Connection.CreateCommand();
+        plan.CommandText =
+            """
+            EXPLAIN QUERY PLAN
+            SELECT id FROM file_entries
+            WHERE root_id = $root_id
+              AND parent_path_key = $parent_path_key
+              AND is_deleted = 0
+              AND path_key > $after_path_key
+            ORDER BY path_key
+            LIMIT 10;
+            """;
+        plan.Parameters.AddWithValue("$root_id", firstRootId);
+        plan.Parameters.AddWithValue("$parent_path_key", "PROJECT");
+        plan.Parameters.AddWithValue("$after_path_key", "PROJECT\\README.MD");
+        await using SqliteDataReader planReader = await plan.ExecuteReaderAsync();
+        List<string> planDetails = [];
+        while (await planReader.ReadAsync())
+        {
+            planDetails.Add(planReader.GetString(3));
+        }
+
+        Assert.Contains(planDetails, detail => detail.Contains("entries_by_parent_path_key", StringComparison.Ordinal));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => repository.ListChildrenAsync(firstRootId, string.Empty, null, 501));
     }

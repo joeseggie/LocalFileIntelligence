@@ -135,12 +135,21 @@ public static class SqliteMigrationRunner
 
     private static IReadOnlyList<SqliteMigrationDefinition> LoadMigrations()
     {
-        const string resourceName = "LocalFileIntelligence.Storage.Migrations.0001_initial_schema.sql";
+        return
+        [
+            LoadMigration(1, "initial_schema"),
+            LoadMigration(2, "directory_paging"),
+        ];
+    }
+
+    private static SqliteMigrationDefinition LoadMigration(int version, string name)
+    {
+        string resourceName = $"LocalFileIntelligence.Storage.Migrations.{version:D4}_{name}.sql";
         using Stream stream = typeof(SqliteMigrationRunner).Assembly.GetManifestResourceStream(resourceName)
             ?? throw new InvalidOperationException($"Embedded migration resource '{resourceName}' was not found.");
         using StreamReader reader = new(stream, Utf8, detectEncodingFromByteOrderMarks: false);
         string sql = reader.ReadToEnd();
-        return [new SqliteMigrationDefinition(1, "initial_schema", sql)];
+        return new SqliteMigrationDefinition(version, name, sql);
     }
 
     private static void ValidateMigrations(IReadOnlyList<SqliteMigrationDefinition> migrations)

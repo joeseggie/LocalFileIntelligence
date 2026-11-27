@@ -1,4 +1,4 @@
--- Initial-release design snapshot. Phase 1 applies the immutable initial schema migration.
+-- Current schema snapshot after applying the immutable Phase 1 migrations.
 PRAGMA foreign_keys = ON;
 BEGIN IMMEDIATE;
 
@@ -57,7 +57,7 @@ CREATE TABLE file_entries (
     CHECK (entry_type = 'file' OR (size_bytes = 0 AND sha256 IS NULL))
 ) STRICT;
 
-CREATE INDEX entries_by_parent ON file_entries(root_id, parent_path_key, is_deleted, entry_type, name);
+CREATE INDEX entries_by_parent_path_key ON file_entries(root_id, parent_path_key, is_deleted, path_key);
 CREATE INDEX entries_by_generation ON file_entries(root_id, last_seen_generation);
 CREATE INDEX entries_by_extension ON file_entries(root_id, extension, is_deleted);
 CREATE INDEX entries_by_hash ON file_entries(sha256, size_bytes)
