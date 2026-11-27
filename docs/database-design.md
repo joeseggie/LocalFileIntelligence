@@ -1,10 +1,11 @@
 # Database design
 
-Status: proposed initial-release schema, executable as a Phase 0 design test.
-`database/schema.sql` is normative. Phase 1 implements the actual connection factory,
-checksummed SQL migrations, repositories, and on-disk recovery tests. LFI-011 adds the
-opt-in migration runner and its immutable initial-schema migration; service startup does
-not invoke it yet.
+Status: initial-release schema and persistence baseline. `database/schema.sql` is
+normative and is checked against the embedded migration. LFI-010 through LFI-013
+implement the connection factory, checksummed SQL migration runner, root repository,
+and root-scoped file-entry repository. The repositories are not wired into service
+startup; file-path validation is lexical and does not authorize or verify filesystem
+access.
 
 ## Data dictionary
 
@@ -54,6 +55,16 @@ Windows policy; preserve display spelling separately. Reject unsupported case-se
 directories. SQLite's ASCII NOCASE is not sufficient for Unicode Windows paths.
 Entries are unique by `(root_id, path_key)`; hard links remain distinct path entries.
 Directory sizes are zero and SHA-256 is null.
+
+The file-entry repository canonicalizes relative path separators and derives the
+case-insensitive key, parent key, name, and extension. It scopes lookups and mutations
+by root ID. Upserts preserve IDs for an existing root/path pair; explicit rename
+preserves the source ID within one root. Meaningful metadata changes advance the file
+and root index revisions, clear cached hashes, reset processing state, and invalidate
+revision-bound content transactionally. Repeated unchanged observations update
+last-seen metadata and the root index revision without invalidating content. Tombstones
+remain addressable by root/path for idempotent resurrection, while directory-child
+queries omit them and use bounded keyset paging.
 
 content_length counts UTF-16 units, not bytes. SHA-256 is lowercase 64-character hex
 and is tied to the verified file revision. Invalidated metadata clears/recomputes its
