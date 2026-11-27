@@ -260,8 +260,8 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
                 SELECT 1
                 FROM file_entries
                 WHERE root_id = $root_id
-                  AND length(path_key) > length($path_key)
-                  AND substr(path_key, 1, length($path_key) + 1) = ($path_key || '\')
+                  AND path_key >= ($path_key || '\')
+                  AND path_key < ($path_key || ']')
             );
             """;
         command.Parameters.AddWithValue("$root_id", rootId);
