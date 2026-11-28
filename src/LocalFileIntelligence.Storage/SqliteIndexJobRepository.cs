@@ -7,7 +7,11 @@ namespace LocalFileIntelligence.Storage;
 public sealed class SqliteIndexJobRepository : IIndexJobRepository
 {
     public const int MaximumAttempts = 3;
+    private const string ClaimableRootStatuses = "'pending', 'scanning', 'ready'";
+    private const string RetainedRootStatuses = "'pending', 'scanning', 'ready', 'paused'";
     private static readonly TimeSpan MaximumLeaseDuration = TimeSpan.FromHours(1);
+    private static readonly string ClaimableJobPredicate = CurrentWorkPredicate("j", ClaimableRootStatuses);
+    private static readonly string RetainedJobPredicate = CurrentWorkPredicate("index_jobs", RetainedRootStatuses);
     private readonly SqliteConnectionFactory _connectionFactory;
 
     public SqliteIndexJobRepository(SqliteConnectionFactory connectionFactory)
@@ -105,26 +109,15 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            """
+            $"""
             UPDATE index_jobs
             SET status = 'running', attempts = attempts + 1, started_at = $now, completed_at = NULL,
                 lease_owner = $lease_owner, lease_until = $lease_until
             WHERE id = (
                 SELECT j.id
                 FROM index_jobs AS j
-                JOIN index_roots AS r ON r.id = j.root_id
                 WHERE j.status = 'queued' AND j.next_attempt_at <= $now
-                  AND r.enabled = 1 AND r.status IN ('pending', 'scanning', 'ready')
-                  AND j.expected_policy_revision = r.policy_revision
-                  AND (
-                      j.file_id IS NULL
-                      OR EXISTS (
-                          SELECT 1 FROM file_entries AS f
-                          WHERE f.id = j.file_id AND f.root_id = j.root_id
-                            AND f.revision = j.expected_file_revision
-                            AND f.is_deleted = 0 AND f.entry_type = 'file'
-                      )
-                  )
+                  AND {ClaimableJobPredicate}
                 ORDER BY j.priority DESC, j.next_attempt_at, j.created_at, j.id
                 LIMIT 1
             )
@@ -176,19 +169,28 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
             .ConfigureAwait(false);
         await using SqliteCommand command = lease.Connection.CreateCommand();
         command.CommandText =
-            """
+            $"""
             UPDATE index_jobs
-            SET status = 'completed', completed_at = $completed_at, lease_owner = NULL, lease_until = NULL
+            SET status = CASE WHEN {RetainedJobPredicate} THEN 'completed' ELSE 'cancelled' END,
+                completed_at = $completed_at, lease_owner = NULL, lease_until = NULL
             WHERE id = $job_id AND status = 'running' AND lease_owner = $lease_owner
-              AND attempts = $attempt_number AND lease_until > $completed_at;
+              AND attempts = $attempt_number AND lease_until > $completed_at
+            RETURNING status;
             """;
         command.Parameters.AddWithValue("$completed_at", timestamp);
         command.Parameters.AddWithValue("$job_id", jobId);
         command.Parameters.AddWithValue("$lease_owner", leaseOwner);
         command.Parameters.AddWithValue("$attempt_number", attemptNumber);
-        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        object? status = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (status is null)
         {
             throw new InvalidOperationException("The job does not have a valid lease for this owner.");
+        }
+
+        if (!string.Equals(Convert.ToString(status, CultureInfo.InvariantCulture), "completed", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The job's root, policy, or file revision changed while it ran; the stale job was cancelled.");
         }
     }
 
@@ -266,28 +268,14 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
         await using SqliteCommand recoverCommand = connection.CreateCommand();
         recoverCommand.Transaction = transaction;
         recoverCommand.CommandText =
-            """
+            $"""
             UPDATE index_jobs
             SET status = CASE WHEN attempts < $maximum_attempts THEN 'queued' ELSE 'failed' END,
                 next_attempt_at = CASE WHEN attempts < $maximum_attempts THEN $now ELSE next_attempt_at END,
                 completed_at = CASE WHEN attempts < $maximum_attempts THEN NULL ELSE $now END,
                 lease_owner = NULL, lease_until = NULL
             WHERE status = 'running' AND lease_until <= $now
-              AND EXISTS (
-                  SELECT 1 FROM index_roots AS r
-                  WHERE r.id = index_jobs.root_id AND r.enabled = 1
-                    AND r.status IN ('pending', 'scanning', 'ready', 'paused')
-                    AND r.policy_revision = index_jobs.expected_policy_revision
-                    AND (
-                        index_jobs.file_id IS NULL
-                        OR EXISTS (
-                            SELECT 1 FROM file_entries AS f
-                            WHERE f.id = index_jobs.file_id AND f.root_id = index_jobs.root_id
-                              AND f.revision = index_jobs.expected_file_revision
-                              AND f.is_deleted = 0 AND f.entry_type = 'file'
-                        )
-                    )
-              );
+              AND {RetainedJobPredicate};
             """;
         recoverCommand.Parameters.AddWithValue("$maximum_attempts", MaximumAttempts);
         recoverCommand.Parameters.AddWithValue("$now", timestamp);
@@ -314,28 +302,40 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            """
+            $"""
             UPDATE index_jobs
             SET status = 'cancelled', completed_at = $now
             WHERE status = 'queued'
-              AND NOT EXISTS (
-                  SELECT 1 FROM index_roots AS r
-                  WHERE r.id = index_jobs.root_id AND r.enabled = 1
-                    AND r.status IN ('pending', 'scanning', 'ready', 'paused')
-                    AND r.policy_revision = index_jobs.expected_policy_revision
-                    AND (
-                        index_jobs.file_id IS NULL
-                        OR EXISTS (
-                            SELECT 1 FROM file_entries AS f
-                            WHERE f.id = index_jobs.file_id AND f.root_id = index_jobs.root_id
-                              AND f.revision = index_jobs.expected_file_revision
-                              AND f.is_deleted = 0 AND f.entry_type = 'file'
-                        )
-                    )
-              );
+              AND NOT {RetainedJobPredicate};
             """;
         command.Parameters.AddWithValue("$now", timestamp);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // Root-level scan/reconcile work stays current on error roots so bounded retries can rescan them;
+    // file-specific work is never current there.
+    private static string CurrentWorkPredicate(string job, string rootStatuses)
+    {
+        return $"""
+            EXISTS (
+                SELECT 1 FROM index_roots AS r
+                WHERE r.id = {job}.root_id AND r.enabled = 1
+                  AND (
+                      r.status IN ({rootStatuses})
+                      OR (r.status = 'error' AND {job}.file_id IS NULL AND {job}.job_type IN ('scan', 'reconcile'))
+                  )
+                  AND r.policy_revision = {job}.expected_policy_revision
+                  AND (
+                      {job}.file_id IS NULL
+                      OR EXISTS (
+                          SELECT 1 FROM file_entries AS f
+                          WHERE f.id = {job}.file_id AND f.root_id = {job}.root_id
+                            AND f.revision = {job}.expected_file_revision
+                            AND f.is_deleted = 0 AND f.entry_type = 'file'
+                      )
+                  )
+            )
+            """;
     }
 
     private static void AddRequestParameters(SqliteCommand command, IndexJobRequest request, string createdAt)

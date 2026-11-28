@@ -35,7 +35,8 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
         generationCommand.CommandText =
             """
             UPDATE index_roots
-            SET scan_generation = scan_generation + 1, status = 'scanning', updated_at = $started_at
+            SET scan_generation = scan_generation + 1, status = 'scanning', updated_at = $started_at,
+                index_revision = index_revision + 1
             WHERE id = $root_id
               AND enabled = 1
               AND status IN ('pending', 'ready', 'scanning', 'error')
@@ -179,7 +180,6 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
                 "A scan with unprocessed discovered files cannot be completed successfully.");
         }
 
-        int deletedEntries = 0;
         if (status == ScanStatus.Completed)
         {
             await using SqliteCommand rootStateCommand = connection.CreateCommand();
@@ -200,7 +200,9 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
             tombstoneCommand.CommandText =
                 """
                 UPDATE file_entries
-                SET is_deleted = 1, deleted_at = $completed_at
+                SET is_deleted = 1, deleted_at = $completed_at, revision = revision + 1,
+                    sha256 = NULL, last_indexed_at = NULL, extraction_status = 'pending',
+                    indexing_status = 'pending', last_error = NULL
                 WHERE root_id = $root_id
                   AND is_deleted = 0
                   AND last_seen_generation < $generation;
@@ -208,7 +210,7 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
             tombstoneCommand.Parameters.AddWithValue("$completed_at", timestamp);
             tombstoneCommand.Parameters.AddWithValue("$root_id", rootId);
             tombstoneCommand.Parameters.AddWithValue("$generation", generation);
-            deletedEntries = await tombstoneCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await tombstoneCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await using SqliteCommand rootUpdateCommand = connection.CreateCommand();
@@ -225,13 +227,12 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
                 updated_at = $completed_at,
                 last_scan_at = CASE WHEN $status = 'completed' THEN $completed_at ELSE last_scan_at END,
                 last_error = CASE WHEN $status = 'completed' THEN NULL ELSE $error_message END,
-                index_revision = index_revision + $deleted_entries
+                index_revision = index_revision + 1
             WHERE id = $root_id AND enabled = 1 AND status = 'scanning';
             """;
         rootUpdateCommand.Parameters.AddWithValue("$status", status.ToString().ToLowerInvariant());
         rootUpdateCommand.Parameters.AddWithValue("$completed_at", timestamp);
         rootUpdateCommand.Parameters.AddWithValue("$error_message", (object?)errorMessage ?? DBNull.Value);
-        rootUpdateCommand.Parameters.AddWithValue("$deleted_entries", deletedEntries == 0 ? 0 : 1);
         rootUpdateCommand.Parameters.AddWithValue("$root_id", rootId);
         await rootUpdateCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -273,7 +274,7 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
                 """
                 UPDATE index_roots
                 SET status = CASE WHEN last_scan_at IS NULL THEN 'pending' ELSE 'ready' END,
-                    updated_at = $recovered_at, last_error = 'interrupted'
+                    updated_at = $recovered_at, last_error = 'interrupted', index_revision = index_revision + 1
                 WHERE id = $root_id AND enabled = 1 AND status = 'scanning';
                 """;
             rootCommand.Parameters.AddWithValue("$recovered_at", timestamp);

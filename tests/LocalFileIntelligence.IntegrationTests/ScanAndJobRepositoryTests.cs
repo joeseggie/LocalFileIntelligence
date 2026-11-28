@@ -21,6 +21,7 @@ public sealed class ScanAndJobRepositoryTests
         await scans.FinishAsync(scan.Id, ScanStatus.Incomplete, StartTime.AddMinutes(1), "access denied");
 
         Assert.Equal(0, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
+        Assert.Equal(2, await fixture.ScalarAsync("SELECT index_revision FROM index_roots WHERE id = 1;"));
         Assert.Equal("pending", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
         Assert.Equal("access denied", await fixture.ScalarTextAsync("SELECT last_error FROM index_roots WHERE id = 1;"));
         Assert.Equal("incomplete", await fixture.ScalarTextAsync("SELECT status FROM scan_runs WHERE id = $id;", scan.Id));
@@ -30,16 +31,35 @@ public sealed class ScanAndJobRepositoryTests
     }
 
     [Fact]
-    public async Task OnlySuccessfulCompleteScanTombstonesEntriesAndAdvancesIndexRevision()
+    public async Task OnlySuccessfulCompleteScanTombstonesAndResetsEntriesAndAdvancesIndexRevision()
     {
         await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
         SqliteScanRunRepository scans = new(fixture.Factory);
+        await fixture.ExecuteAsync(
+            """
+            UPDATE file_entries
+            SET sha256 = lower(hex(zeroblob(32))), last_indexed_at = '2026-01-01T00:00:00.000Z',
+                extraction_status = 'extracted', indexing_status = 'indexed', last_error = 'synthetic'
+            WHERE id = 1;
+            INSERT INTO file_contents (file_id, file_revision, extracted_text, extractor, extractor_version,
+                                       extracted_at, content_length)
+            VALUES (1, 1, 'synthetic text', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 14);
+            """);
         ScanRun scan = await scans.StartAsync(1, ScanType.Reconciliation, StartTime);
+        Assert.Equal(1, await fixture.ScalarAsync("SELECT index_revision FROM index_roots WHERE id = 1;"));
 
         await scans.FinishAsync(scan.Id, ScanStatus.Completed, StartTime.AddMinutes(1));
 
         Assert.Equal(1, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
-        Assert.Equal(1, await fixture.ScalarAsync("SELECT index_revision FROM index_roots WHERE id = 1;"));
+        Assert.Equal(2, await fixture.ScalarAsync("SELECT revision FROM file_entries WHERE id = 1;"));
+        Assert.Equal(1, await fixture.ScalarAsync(
+            """
+            SELECT count(*) FROM file_entries
+            WHERE id = 1 AND sha256 IS NULL AND last_indexed_at IS NULL AND last_error IS NULL
+              AND extraction_status = 'pending' AND indexing_status = 'pending';
+            """));
+        Assert.Equal(0, await fixture.ScalarAsync("SELECT count(*) FROM file_contents;"));
+        Assert.Equal(2, await fixture.ScalarAsync("SELECT index_revision FROM index_roots WHERE id = 1;"));
         Assert.Equal("ready", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
         Assert.Equal(1, await fixture.ScalarAsync("SELECT generation FROM scan_runs WHERE id = $id;", scan.Id));
     }
@@ -108,6 +128,7 @@ public sealed class ScanAndJobRepositoryTests
             await fixture.ScalarTextAsync("SELECT status FROM scan_runs WHERE id = $id;", interrupted.Id));
         Assert.Equal("ready", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
         Assert.Equal("interrupted", await fixture.ScalarTextAsync("SELECT last_error FROM index_roots WHERE id = 1;"));
+        Assert.Equal(2, await fixture.ScalarAsync("SELECT index_revision FROM index_roots WHERE id = 1;"));
         Assert.Equal(0, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
         Assert.False(await scans.RecoverInterruptedAsync(1, StartTime.AddMinutes(2)));
 
@@ -148,9 +169,15 @@ public sealed class ScanAndJobRepositoryTests
         SqliteIndexJobRepository jobs = new(fixture.Factory);
         long id = await jobs.EnqueueAsync(JobRequest("only-job", 50));
 
-        Task<IndexJob?>[] claims = Enumerable.Range(0, 8)
-            .Select(index => jobs.ClaimNextAsync($"worker-{index}", StartTime, TimeSpan.FromMinutes(1)))
-            .ToArray();
+        Task<IndexJob?>[] claims;
+        await using (SqliteConnectionLease heldWriter = await fixture.Factory.OpenWriterAsync())
+        {
+            claims = Enumerable.Range(0, 8)
+                .Select(index => jobs.ClaimNextAsync($"worker-{index}", StartTime, TimeSpan.FromMinutes(1)))
+                .ToArray();
+            Assert.All(claims, claim => Assert.False(claim.IsCompleted));
+        }
+
         IndexJob?[] results = await Task.WhenAll(claims);
 
         IndexJob claimed = Assert.Single(results, result => result is not null)!;
@@ -308,31 +335,98 @@ public sealed class ScanAndJobRepositoryTests
     }
 
     [Fact]
-    public async Task PausedRootsRetainQueuedAndRecoveredWorkButAreNotClaimed()
+    public async Task CompletionCancelsWorkWhoseFileOrPolicyRevisionChangedWhileRunning()
     {
         await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
         SqliteIndexJobRepository jobs = new(fixture.Factory);
-        long expiringId = await jobs.EnqueueAsync(JobRequest("expiring", 90, rootId: 2));
-        IndexJob? expiring = await jobs.ClaimNextAsync("worker", StartTime, TimeSpan.FromMinutes(1));
-        Assert.NotNull(expiring);
-        Assert.Equal(expiringId, expiring.Id);
+        long fileJobId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 1));
+        IndexJob? fileJob = await jobs.ClaimNextAsync("worker", StartTime, TimeSpan.FromMinutes(1));
+        Assert.NotNull(fileJob);
+        await fixture.ExecuteAsync("UPDATE file_entries SET revision = 2 WHERE id = 1;");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => jobs.CompleteAsync(fileJobId, "worker", fileJob.Attempts, StartTime.AddSeconds(10)));
+        Assert.Equal("cancelled", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", fileJobId));
+
+        long policyJobId = await jobs.EnqueueAsync(JobRequest("policy", 50, rootId: 2));
+        IndexJob? policyJob = await jobs.ClaimNextAsync("worker", StartTime.AddSeconds(10), TimeSpan.FromMinutes(1));
+        Assert.NotNull(policyJob);
+        Assert.Equal(policyJobId, policyJob.Id);
+        await fixture.ExecuteAsync("UPDATE index_roots SET policy_revision = 2 WHERE id = 2;");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => jobs.CompleteAsync(policyJobId, "worker", policyJob.Attempts, StartTime.AddSeconds(20)));
+        Assert.Equal("cancelled",
+            await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", policyJobId));
+        Assert.Equal(0, await fixture.ScalarAsync(
+            "SELECT count(*) FROM index_jobs WHERE lease_owner IS NOT NULL OR lease_until IS NOT NULL;"));
+    }
+
+    [Fact]
+    public async Task FailedScanRetryRemainsClaimableOnErrorRootWhileFileWorkIsCancelled()
+    {
+        await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
+        SqliteScanRunRepository scans = new(fixture.Factory);
+        SqliteIndexJobRepository jobs = new(fixture.Factory);
+        long scanJobId = await jobs.EnqueueAsync(
+            new IndexJobRequest(1, null, IndexJobType.Scan, "scan-root-1", 90, StartTime, StartTime, null, 1));
+        long fileJobId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 1));
+        IndexJob? scanJob = await jobs.ClaimNextAsync("worker", StartTime, TimeSpan.FromMinutes(1));
+        Assert.NotNull(scanJob);
+        Assert.Equal(scanJobId, scanJob.Id);
+
+        ScanRun scan = await scans.StartAsync(1, ScanType.Initial, StartTime);
+        await scans.FinishAsync(scan.Id, ScanStatus.Failed, StartTime.AddSeconds(10), "synthetic failure");
+        await jobs.RetryAsync(
+            scanJob.Id,
+            "worker",
+            scanJob.Attempts,
+            StartTime.AddSeconds(10),
+            StartTime.AddSeconds(20),
+            "synthetic failure");
+        Assert.Equal("error", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
+
+        IndexJob? retry = await jobs.ClaimNextAsync("worker", StartTime.AddSeconds(20), TimeSpan.FromMinutes(1));
+
+        Assert.NotNull(retry);
+        Assert.Equal(scanJobId, retry.Id);
+        Assert.Equal(2, retry.Attempts);
+        Assert.Equal("cancelled", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", fileJobId));
+    }
+
+    [Fact]
+    public async Task PausingThroughTheRootRepositoryCancelsActiveWorkUntilTheRootResumes()
+    {
+        await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
+        SqliteIndexJobRepository jobs = new(fixture.Factory);
+        SqliteIndexRootRepository roots = new(fixture.Factory);
+        long runningId = await jobs.EnqueueAsync(JobRequest("running", 90, rootId: 2));
+        IndexJob? running = await jobs.ClaimNextAsync("worker", StartTime, TimeSpan.FromMinutes(1));
+        Assert.NotNull(running);
+        Assert.Equal(runningId, running.Id);
         long queuedId = await jobs.EnqueueAsync(JobRequest("queued", 80, rootId: 2));
-        long activeRootJobId = await jobs.EnqueueAsync(JobRequest("active-root", 10));
-        await fixture.ExecuteAsync("UPDATE index_roots SET status = 'paused' WHERE id = 2;");
+        long otherRootJobId = await jobs.EnqueueAsync(JobRequest("other-root", 10));
 
-        IndexJob? claimed = await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1));
+        await roots.UpdateStateAsync(2, enabled: true, IndexRootStatus.Paused, StartTime.AddSeconds(10));
 
+        Assert.Equal("cancelled", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", runningId));
+        Assert.Equal("cancelled", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", queuedId));
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => jobs.CompleteAsync(runningId, "worker", running.Attempts, StartTime.AddSeconds(20)));
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => jobs.EnqueueAsync(JobRequest("queued", 80, rootId: 2)));
+        IndexJob? claimed = await jobs.ClaimNextAsync("worker", StartTime.AddSeconds(20), TimeSpan.FromMinutes(1));
         Assert.NotNull(claimed);
-        Assert.Equal(activeRootJobId, claimed.Id);
-        Assert.Equal("queued", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", expiringId));
-        Assert.Equal("queued", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", queuedId));
-        Assert.Null(await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1)));
+        Assert.Equal(otherRootJobId, claimed.Id);
+        Assert.Null(await jobs.ClaimNextAsync("worker", StartTime.AddSeconds(20), TimeSpan.FromMinutes(1)));
 
-        await fixture.ExecuteAsync("UPDATE index_roots SET status = 'ready' WHERE id = 2;");
-        IndexJob? resumed = await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1));
+        await roots.UpdateStateAsync(2, enabled: true, IndexRootStatus.Ready, StartTime.AddSeconds(30));
+        long resumedId = await jobs.EnqueueAsync(JobRequest("queued", 80, rootId: 2));
+        IndexJob? resumed = await jobs.ClaimNextAsync("worker", StartTime.AddSeconds(30), TimeSpan.FromMinutes(1));
+
+        Assert.NotEqual(queuedId, resumedId);
         Assert.NotNull(resumed);
-        Assert.Equal(expiringId, resumed.Id);
-        Assert.Equal(2, resumed.Attempts);
+        Assert.Equal(resumedId, resumed.Id);
     }
 
     private static IndexJobRequest JobRequest(string dedupeKey, int priority, long rootId = 1, long policyRevision = 1)
