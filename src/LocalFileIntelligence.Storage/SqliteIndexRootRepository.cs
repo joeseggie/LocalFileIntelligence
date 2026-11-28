@@ -53,6 +53,7 @@ public sealed class SqliteIndexRootRepository : IIndexRootRepository
             return existing;
         }
 
+        await CheckSelectionAsync(connection, transaction, pathKey, registration, cancellationToken).ConfigureAwait(false);
         await using SqliteCommand insert = connection.CreateCommand();
         insert.Transaction = transaction;
         insert.CommandText =
@@ -260,6 +261,32 @@ public sealed class SqliteIndexRootRepository : IIndexRootRepository
         command.Parameters.AddWithValue("$path_key", pathKey);
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRoot(reader) : null;
+    }
+
+    private static async Task CheckSelectionAsync(SqliteConnection connection, SqliteTransaction transaction,
+        string pathKey, IndexRootRegistration registration, CancellationToken cancellationToken)
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT path_key, volume_identity, directory_identity FROM index_roots;";
+        await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        int count = 0;
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string existingKey = reader.GetString(0);
+            bool sameVolume = reader.GetString(1) == registration.VolumeIdentity;
+            if (SelectedFolderPath.Overlaps(existingKey, pathKey)
+                || (sameVolume && (reader.GetString(2) == registration.DirectoryIdentity
+                    || SelectedFolderPath.Overlaps(existingKey[2..], pathKey[2..]))))
+            {
+                throw new InvalidOperationException("The selected directory overlaps an existing root.");
+            }
+
+            if (++count == IndexingConfiguration.MaximumSelectedFolders)
+            {
+                throw new InvalidOperationException($"At most {IndexingConfiguration.MaximumSelectedFolders} folders may be registered.");
+            }
+        }
     }
 
     private static IndexRoot ReadRoot(SqliteDataReader reader)

@@ -11,6 +11,7 @@
     <Using Include="Xunit" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\src\LocalFileIntelligence.Infrastructure\LocalFileIntelligence.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\LocalFileIntelligence.Storage\LocalFileIntelligence.Storage.csproj" />
     <None Include="..\..\docs\database\schema.sql" Link="Fixtures\schema.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

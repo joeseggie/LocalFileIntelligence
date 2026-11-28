@@ -6,6 +6,7 @@ namespace LocalFileIntelligence.Core.Configuration;
 
 public sealed class IndexingConfiguration
 {
+    public const int MaximumSelectedFolders = 32;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private IndexingConfiguration(ReadOnlyCollection<string> selectedFolders)
@@ -74,9 +75,9 @@ public sealed class IndexingConfiguration
             throw new FormatException("schemaVersion is required and must be integer 1.");
         }
 
-        if (folders.ValueKind != JsonValueKind.Array || folders.GetArrayLength() > 32)
+        if (folders.ValueKind != JsonValueKind.Array || folders.GetArrayLength() > MaximumSelectedFolders)
         {
-            throw new FormatException("selectedFolders is required and must be an array of at most 32 paths.");
+            throw new FormatException($"selectedFolders is required and must be an array of at most {MaximumSelectedFolders} paths.");
         }
 
         List<string> selected = [];
