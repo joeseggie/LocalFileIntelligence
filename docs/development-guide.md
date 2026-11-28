@@ -75,7 +75,7 @@ not application/CI dependencies.
 | Suite | Current coverage | Does not prove |
 | --- | --- | --- |
 | UnitTests | Configuration policy, project boundaries, actual MCP JSON Schemas/examples | Live path containment, MCP transport or agent locality |
-| IntegrationTests | Real in-memory SQLite initial schema, constraints and FTS mutation/purge | Migration engine, on-disk WAL, locks or crash recovery |
+| IntegrationTests | In-memory design-snapshot schema/constraints/FTS mutation/purge; on-disk temporary SQLite connection settings, WAL, leases, migrations (fresh/repeat/upgrade/rollback/process-kill reopen/overlap/backup) and repositories | Installed-service storage, cross-user ACL enforcement, power-loss durability or a live index |
 | AcceptanceTests | Safe command arguments, config encoding/size, exit codes/redaction | Installed Windows Service or an interactive WinUI product |
 
 Run a focused suite/filter while developing, then the required checks before a PR:
