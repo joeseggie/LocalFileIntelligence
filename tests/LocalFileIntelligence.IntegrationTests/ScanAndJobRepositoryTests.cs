@@ -293,6 +293,18 @@ public sealed class ScanAndJobRepositoryTests
         Assert.NotNull(replacement);
         Assert.Equal(replacementId, replacement.Id);
         Assert.Equal(3, replacement.ExpectedFileRevision);
+
+        long stalePolicyId = await jobs.EnqueueAsync(JobRequest("reconcile", 50, rootId: 2));
+        await fixture.ExecuteAsync("UPDATE index_roots SET policy_revision = 2 WHERE id = 2;");
+        long currentPolicyId = await jobs.EnqueueAsync(JobRequest("reconcile", 50, rootId: 2, policyRevision: 2));
+
+        Assert.NotEqual(stalePolicyId, currentPolicyId);
+        Assert.Equal("cancelled",
+            await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", stalePolicyId));
+        IndexJob? policyJob = await jobs.ClaimNextAsync("worker-c", StartTime.AddSeconds(20), TimeSpan.FromMinutes(1));
+        Assert.NotNull(policyJob);
+        Assert.Equal(currentPolicyId, policyJob.Id);
+        Assert.Equal(2, policyJob.ExpectedPolicyRevision);
     }
 
     [Fact]
@@ -323,7 +335,7 @@ public sealed class ScanAndJobRepositoryTests
         Assert.Equal(2, resumed.Attempts);
     }
 
-    private static IndexJobRequest JobRequest(string dedupeKey, int priority, long rootId = 1)
+    private static IndexJobRequest JobRequest(string dedupeKey, int priority, long rootId = 1, long policyRevision = 1)
     {
         return new IndexJobRequest(
             rootId,
@@ -334,7 +346,7 @@ public sealed class ScanAndJobRepositoryTests
             StartTime,
             StartTime,
             null,
-            1);
+            policyRevision);
     }
 
     private static IndexJobRequest FileJobRequest(long fileRevision)
