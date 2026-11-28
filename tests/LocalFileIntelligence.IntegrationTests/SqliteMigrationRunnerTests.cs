@@ -3,6 +3,7 @@ using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
 using LocalFileIntelligence.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -277,6 +278,182 @@ public sealed class SqliteMigrationRunnerTests
         }
 
         Assert.Single(Directory.GetFiles(directory.Path, "index.db.pre-upgrade-1-to-2-*.bak"));
+    }
+
+    [Theory]
+    [InlineData("version-gap")]
+    [InlineData("out-of-order")]
+    [InlineData("duplicate-name")]
+    [InlineData("blank-sql")]
+    [InlineData("empty-list")]
+    public async Task RejectsInvalidMigrationCatalogBeforeTouchingDatabase(string invalidCase)
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        SqliteMigrationRunner.SqliteMigrationDefinition[] migrations = invalidCase switch
+        {
+            "version-gap" =>
+            [
+                Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);"),
+                Migration(3, "three", "CREATE TABLE data_v3 (value TEXT);"),
+            ],
+            "out-of-order" =>
+            [
+                Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);"),
+                Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);"),
+            ],
+            "duplicate-name" =>
+            [
+                Migration(1, "same", "CREATE TABLE data_v1 (value TEXT);"),
+                Migration(2, "same", "CREATE TABLE data_v2 (value TEXT);"),
+            ],
+            "blank-sql" => [Migration(1, "one", " ")],
+            "empty-list" => [],
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidCase), invalidCase, "Unknown catalog case."),
+        };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => SqliteMigrationRunner.ApplyAsync(factory, migrations));
+
+        await using SqliteConnectionLease reader = await factory.OpenReaderAsync();
+        Assert.Empty(await GetObjectNamesAsync(reader.Connection));
+    }
+
+    [Fact]
+    public async Task RejectsAppliedLedgerVersionGapWithoutChangingDatabase()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        SqliteMigrationRunner.SqliteMigrationDefinition[] migrations =
+        [
+            Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);"),
+            Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);"),
+            Migration(3, "three", "CREATE TABLE data_v3 (value TEXT);"),
+        ];
+        await SqliteMigrationRunner.ApplyAsync(factory, [migrations[0]]);
+        await using (SqliteConnectionLease writer = await factory.OpenWriterAsync())
+        {
+            await ExecuteAsync(writer.Connection, "INSERT INTO data_v1 VALUES ('before-upgrade');");
+            await using SqliteCommand insert = writer.Connection.CreateCommand();
+            insert.CommandText =
+                """
+                INSERT INTO schema_migrations (version, name, sha256, applied_at)
+                VALUES (3, $name, $sha256, '2026-01-01T00:00:00.000Z');
+                """;
+            insert.Parameters.AddWithValue("$name", migrations[2].Name);
+            insert.Parameters.AddWithValue("$sha256", Checksum(migrations[2].Sql));
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => SqliteMigrationRunner.ApplyAsync(factory, migrations));
+
+        Assert.Contains("version gap", exception.Message, StringComparison.Ordinal);
+        await using SqliteConnectionLease reader = await factory.OpenReaderAsync();
+        Assert.Equal(2, await ScalarAsync<long>(reader.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal("before-upgrade", await ScalarAsync<string>(reader.Connection, "SELECT value FROM data_v1;"));
+        Assert.Equal(0, await ScalarAsync<long>(
+            reader.Connection,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('data_v2', 'data_v3');"));
+        Assert.Empty(Directory.GetFiles(directory.Path, "*.bak"));
+    }
+
+    [Fact]
+    public async Task FailedLaterMigrationRollsBackWholeUpgradeAndCanRetry()
+    {
+        using TemporaryDirectory directory = new();
+        SqliteMigrationRunner.SqliteMigrationDefinition[] upgrade = UpgradeMigrations(
+            "CREATE TABLE data_v3 (value TEXT); INSERT INTO missing_table VALUES (1);");
+        int migrationSqlCompletions = 0;
+
+        using (SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path))
+        {
+            await ApplyInitialUpgradeFixtureAsync(factory, upgrade[0]);
+            await Assert.ThrowsAsync<SqliteException>(
+                () => SqliteMigrationRunner.ApplyAsync(
+                    factory,
+                    upgrade,
+                    afterMigrationSql: _ =>
+                    {
+                        migrationSqlCompletions++;
+                        return Task.CompletedTask;
+                    }));
+        }
+
+        Assert.Equal(1, migrationSqlCompletions);
+        await AssertUpgradeRolledBackAndRetryAsync(
+            directory.Path,
+            UpgradeMigrations("CREATE TABLE data_v3 (value TEXT); INSERT INTO data_v3 VALUES ('v3');"));
+    }
+
+    [Fact]
+    public async Task CancellationDuringMigrationRollsBackWholeUpgradeAndCanRetry()
+    {
+        using TemporaryDirectory directory = new();
+        SqliteMigrationRunner.SqliteMigrationDefinition[] upgrade = UpgradeMigrations(
+            "CREATE TABLE data_v3 (value TEXT); INSERT INTO data_v3 VALUES ('v3');");
+        using CancellationTokenSource cancellation = new();
+        int migrationSqlCompletions = 0;
+
+        using (SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path))
+        {
+            await ApplyInitialUpgradeFixtureAsync(factory, upgrade[0]);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => SqliteMigrationRunner.ApplyAsync(
+                    factory,
+                    upgrade,
+                    cancellation.Token,
+                    afterMigrationSql: _ =>
+                    {
+                        if (++migrationSqlCompletions == 2)
+                        {
+                            cancellation.Cancel();
+                        }
+
+                        return Task.CompletedTask;
+                    }));
+        }
+
+        Assert.Equal(2, migrationSqlCompletions);
+        await AssertUpgradeRolledBackAndRetryAsync(directory.Path, upgrade);
+    }
+
+    [Fact]
+    public async Task BackupFailureRemovesPartialFileAndCanRetry()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        SqliteMigrationRunner.SqliteMigrationDefinition first = Migration(
+            1,
+            "one",
+            """
+            CREATE TABLE data_v1 (value BLOB);
+            WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM sequence WHERE n < 200)
+            INSERT INTO data_v1 SELECT zeroblob(4000) FROM sequence;
+            """);
+        SqliteMigrationRunner.SqliteMigrationDefinition second = Migration(2, "two", "CREATE TABLE data_v2 (value TEXT);");
+        await SqliteMigrationRunner.ApplyAsync(factory, [first]);
+
+        await Assert.ThrowsAsync<IOException>(
+            () => SqliteMigrationRunner.ApplyAsync(
+                factory,
+                [first, second],
+                afterBackupStep: _ => throw new IOException("Simulated backup write failure.")));
+
+        Assert.Empty(Directory.GetFiles(directory.Path, "*.bak"));
+        await using (SqliteConnectionLease reader = await factory.OpenReaderAsync())
+        {
+            Assert.Equal(1, await ScalarAsync<long>(reader.Connection, "SELECT count(*) FROM schema_migrations;"));
+            Assert.Equal(200, await ScalarAsync<long>(reader.Connection, "SELECT count(*) FROM data_v1;"));
+            Assert.Equal(0, await ScalarAsync<long>(
+                reader.Connection,
+                "SELECT count(*) FROM sqlite_master WHERE name = 'data_v2';"));
+        }
+
+        await SqliteMigrationRunner.ApplyAsync(factory, [first, second]);
+
+        Assert.Single(Directory.GetFiles(directory.Path, "index.db.pre-upgrade-1-to-2-*.bak"));
+        await using SqliteConnectionLease upgraded = await factory.OpenReaderAsync();
+        Assert.Equal(2, await ScalarAsync<long>(upgraded.Connection, "SELECT count(*) FROM schema_migrations;"));
     }
 
     [Fact]
@@ -555,6 +732,77 @@ public sealed class SqliteMigrationRunnerTests
     private static SqliteMigrationRunner.SqliteMigrationDefinition Migration(int version, string name, string sql)
     {
         return new SqliteMigrationRunner.SqliteMigrationDefinition(version, name, sql);
+    }
+
+    private static string Checksum(string sql)
+    {
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sql)));
+    }
+
+    private static SqliteMigrationRunner.SqliteMigrationDefinition[] UpgradeMigrations(string thirdMigrationSql)
+    {
+        return
+        [
+            Migration(1, "one", "CREATE TABLE data_v1 (value TEXT);"),
+            Migration(
+                2,
+                "two",
+                """
+                CREATE TABLE data_v2 (value TEXT);
+                INSERT INTO data_v2 VALUES ('v2');
+                UPDATE data_v1 SET value = 'changed-by-v2';
+                """),
+            Migration(3, "three", thirdMigrationSql),
+        ];
+    }
+
+    private static async Task ApplyInitialUpgradeFixtureAsync(
+        SqliteConnectionFactory factory,
+        SqliteMigrationRunner.SqliteMigrationDefinition initialMigration)
+    {
+        await SqliteMigrationRunner.ApplyAsync(factory, [initialMigration]);
+        await using SqliteConnectionLease writer = await factory.OpenWriterAsync();
+        await ExecuteAsync(writer.Connection, "INSERT INTO data_v1 VALUES ('before-upgrade');");
+    }
+
+    private static async Task AssertUpgradeRolledBackAndRetryAsync(
+        string directoryPath,
+        SqliteMigrationRunner.SqliteMigrationDefinition[] retryMigrations)
+    {
+        using SqliteConnectionFactory reopened = await SqliteConnectionFactory.CreateAsync(directoryPath);
+        Assert.True(File.Exists(reopened.DatabasePath));
+        await using (SqliteConnectionLease reader = await reopened.OpenReaderAsync())
+        {
+            await AssertInitialUpgradeStateAsync(reader.Connection);
+        }
+
+        string backupPath = Assert.Single(Directory.GetFiles(directoryPath, "index.db.pre-upgrade-1-to-3-*.bak"));
+        await using (SqliteConnection backup = new(new SqliteConnectionStringBuilder
+        {
+            DataSource = backupPath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString()))
+        {
+            await backup.OpenAsync();
+            await AssertInitialUpgradeStateAsync(backup);
+        }
+
+        await SqliteMigrationRunner.ApplyAsync(reopened, retryMigrations);
+
+        await using SqliteConnectionLease upgraded = await reopened.OpenReaderAsync();
+        Assert.Equal(3, await ScalarAsync<long>(upgraded.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal("changed-by-v2", await ScalarAsync<string>(upgraded.Connection, "SELECT value FROM data_v1;"));
+        Assert.Equal("v3", await ScalarAsync<string>(upgraded.Connection, "SELECT value FROM data_v3;"));
+    }
+
+    private static async Task AssertInitialUpgradeStateAsync(SqliteConnection connection)
+    {
+        Assert.Equal(1, await ScalarAsync<long>(connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal("before-upgrade", await ScalarAsync<string>(connection, "SELECT value FROM data_v1;"));
+        Assert.Equal(0, await ScalarAsync<long>(
+            connection,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('data_v2', 'data_v3');"));
     }
 
     private static Process StartCrashHelper(string directory, string markerPath)
