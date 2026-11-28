@@ -19,13 +19,14 @@ runner are not wired into `WindowsService`; the migration runner is not invoked 
 service startup. LFI-012 adds an opt-in Storage root repository that persists roots as
 disabled until an explicit state update; it does not verify physical folders or enroll
 roots. LFI-013 adds root-scoped file-entry upsert, rename, tombstone, and direct-child
-lookup operations over the initial schema. Path checks are lexical only; they do not
-authorize or verify filesystem access. These repositories are not wired into the
-service or indexer. No service is installed, no personal folders are scanned, and no
-desktop UI or MCP endpoint is active. Most projects establish boundaries only.
-`WindowsService` currently offers a safe, configuration-only command; `McpServer` fails
-explicitly until Phase 8 is implemented. The Desktop project is a boundary-only Windows
-library; WinUI/MVVM/tray work is Phase 6.
+lookup operations over the initial schema. LFI-014 adds Application contracts and
+Storage repositories for scan runs and index jobs, tested against the schema snapshot.
+Path checks are lexical only; they do not authorize or verify filesystem access. These
+repositories are not wired into the service or indexer. No service is installed, no
+personal folders are scanned, and no desktop UI or MCP endpoint is active. Most projects
+establish boundaries only. `WindowsService` currently offers a safe, configuration-only
+command; `McpServer` fails explicitly until Phase 8 is implemented. The Desktop project
+is a boundary-only Windows library; WinUI/MVVM/tray work is Phase 6.
 
 ## Build and run the safe starter
 

@@ -3,9 +3,9 @@
 Status: initial-release schema and persistence baseline. `database/schema.sql` is
 normative and is checked against the embedded migration. LFI-010 through LFI-013
 implement the connection factory, checksummed SQL migration runner, root repository,
-and root-scoped file-entry repository. The repositories are not wired into service
-startup; file-path validation is lexical and does not authorize or verify filesystem
-access.
+and root-scoped file-entry repository. LFI-014 adds scan-run and index-job repositories,
+tested against this snapshot. The repositories are not wired into service startup;
+file-path validation is lexical and does not authorize or verify filesystem access.
 
 ## Data dictionary
 
@@ -107,8 +107,14 @@ service startup.
 ## Transaction invariants
 
 **Scan:** persist a new generation/run, stream idempotent batches, and update progress.
-Only complete successful enumeration may mark unseen entries deleted. Access failure,
-depth/resource exhaustion, cancellation, and offline roots produce incomplete runs.
+Only complete successful enumeration may mark unseen entries deleted; those tombstones
+increment the file revision and reset its hash, index timestamp, and processing states.
+Access failure, depth/resource exhaustion, cancellation, and offline roots produce
+incomplete runs. Incomplete or interrupted runs record the root's last error but return
+it to `ready` (or `pending` before any completed scan) so queued work is kept; only failed
+runs mark the root `error`, where only root-level scan/reconcile work stays eligible so
+bounded retries can rescan it. Starting, finishing, and recovering a scan each increment
+the root's index_revision.
 
 **Metadata/hash:** verify actual file identity/size/time and root policy. Increment the
 file revision on change, clear stale SHA-256, and invalidate content in the same
@@ -120,13 +126,15 @@ text, length, and timestamp together. The composite FK rejects mismatched revisi
 Entry invalidation deletes cached content; FTS triggers remove indexed terms.
 
 **Root state:** disabling or losing access hides data immediately, cancels active jobs,
-and removes cached content. Pausing stops work without revoking read consent, but live
-access checks still apply. Removing a root cascades entries/content/scans/jobs/exclusions/
+and removes cached content. Pausing cancels the root's active jobs and rejects new work
+until it resumes, without revoking read consent, but live access checks still apply. Removing a root cascades entries/content/scans/jobs/exclusions/
 grants/pending requests. Logical purging is not physical secure erase.
 
 **Jobs:** active work is unique by root/type/dedupe key. File-specific jobs cannot name
 a file belonging to another root. Only running jobs hold a lease; claims and lease
-recovery are atomic. Retries are bounded and stale/policy-revoked work is discarded.
+recovery are atomic. Retries are bounded and stale/policy-revoked work is discarded,
+including when it finishes: completion rechecks the root policy and file revision and
+cancels stale work instead of recording success.
 
 **Scoped revisions:** increment each affected index_roots.index_revision in the same
 transaction as query-visible changes. API indexRevision is the sum for the requested,
