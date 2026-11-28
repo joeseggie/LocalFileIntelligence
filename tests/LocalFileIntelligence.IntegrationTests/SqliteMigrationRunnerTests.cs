@@ -11,7 +11,7 @@ namespace LocalFileIntelligence.IntegrationTests;
 public sealed class SqliteMigrationRunnerTests
 {
     [Fact]
-    public async Task AppliesInitialSchemaAndIsIdempotent()
+    public async Task AppliesSchemaAndIsIdempotent()
     {
         using TemporaryDirectory directory = new();
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
@@ -25,8 +25,37 @@ public sealed class SqliteMigrationRunnerTests
         await ExecuteAsync(
             snapshot,
             File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "schema.sql")));
-        Assert.Equal(1, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal(2, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
         Assert.Equal(await GetObjectNamesAsync(snapshot), await GetObjectNamesAsync(lease.Connection));
+    }
+
+    [Fact]
+    public async Task UpgradesInitialSchemaWithDirectoryPagingIndex()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        const string resourceName = "LocalFileIntelligence.Storage.Migrations.0001_initial_schema.sql";
+        using Stream migrationStream = typeof(SqliteMigrationRunner).Assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded migration resource '{resourceName}' was not found.");
+        using StreamReader migrationReader = new(migrationStream);
+        await SqliteMigrationRunner.ApplyAsync(
+            factory,
+            [Migration(1, "initial_schema", await migrationReader.ReadToEndAsync())]);
+
+        await SqliteMigrationRunner.ApplyAsync(factory);
+
+        await using SqliteConnectionLease lease = await factory.OpenReaderAsync();
+        Assert.Equal(2, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal(
+            1,
+            await ScalarAsync<long>(
+                lease.Connection,
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'entries_by_parent_path_key';"));
+        Assert.Equal(
+            0,
+            await ScalarAsync<long>(
+                lease.Connection,
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'entries_by_parent';"));
     }
 
     [Fact]
@@ -84,6 +113,18 @@ public sealed class SqliteMigrationRunnerTests
 
         Assert.Equal(
             "002e7056d0b1dce8eeb2b0c5d4160bc49285ee6228b141d584c8c5b8b34aba0b",
+            Convert.ToHexStringLower(SHA256.HashData(migration)));
+    }
+
+    [Fact]
+    public void DirectoryPagingMigrationChecksumIsImmutable()
+    {
+        const string resourceName = "LocalFileIntelligence.Storage.Migrations.0002_directory_paging.sql";
+        using Stream migration = typeof(SqliteMigrationRunner).Assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded migration resource '{resourceName}' was not found.");
+
+        Assert.Equal(
+            "5ed09902d71c9fc6a43b602af539124829a597a94536fde9f7cb6d05dde9b378",
             Convert.ToHexStringLower(SHA256.HashData(migration)));
     }
 
