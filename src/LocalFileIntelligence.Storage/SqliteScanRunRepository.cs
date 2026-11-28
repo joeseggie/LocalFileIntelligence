@@ -148,7 +148,7 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
             UPDATE scan_runs
             SET status = $status, completed_at = $completed_at, error_message = $error_message
             WHERE id = $scan_run_id AND status = 'running'
-            RETURNING root_id, generation, files_failed;
+            RETURNING root_id, generation, files_discovered, files_processed, files_failed;
             """;
         finishCommand.Parameters.AddWithValue("$status", status.ToString().ToLowerInvariant());
         finishCommand.Parameters.AddWithValue("$completed_at", timestamp);
@@ -163,12 +163,20 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
 
         long rootId = reader.GetInt64(0);
         long generation = reader.GetInt64(1);
-        int filesFailed = reader.GetInt32(2);
+        int filesDiscovered = reader.GetInt32(2);
+        int filesProcessed = reader.GetInt32(3);
+        int filesFailed = reader.GetInt32(4);
         await reader.DisposeAsync().ConfigureAwait(false);
 
         if (status == ScanStatus.Completed && filesFailed != 0)
         {
             throw new InvalidOperationException("A scan with failed files cannot be completed successfully.");
+        }
+
+        if (status == ScanStatus.Completed && filesProcessed != filesDiscovered)
+        {
+            throw new InvalidOperationException(
+                "A scan with unprocessed discovered files cannot be completed successfully.");
         }
 
         int deletedEntries = 0;

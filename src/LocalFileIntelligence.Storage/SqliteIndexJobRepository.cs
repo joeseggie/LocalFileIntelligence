@@ -25,7 +25,28 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
         string nextAttemptAt = SqliteRepositoryValues.FormatTimestamp(request.NextAttemptAt);
         await using SqliteConnectionLease lease = await _connectionFactory.OpenWriterAsync(cancellationToken)
             .ConfigureAwait(false);
-        await using SqliteCommand command = lease.Connection.CreateCommand();
+        SqliteConnection connection = lease.Connection;
+        await using SqliteTransaction transaction = connection.BeginTransaction();
+
+        await using SqliteCommand retireCommand = connection.CreateCommand();
+        retireCommand.Transaction = transaction;
+        retireCommand.CommandText =
+            """
+            UPDATE index_jobs
+            SET status = 'cancelled', completed_at = $created_at, lease_owner = NULL, lease_until = NULL
+            WHERE root_id = $root_id AND job_type = $job_type AND dedupe_key = $dedupe_key
+              AND status IN ('queued', 'running')
+              AND NOT (
+                  file_id IS $file_id
+                  AND expected_file_revision IS $file_revision
+                  AND expected_policy_revision = $policy_revision
+              );
+            """;
+        AddRequestParameters(retireCommand, request, createdAt);
+        await retireCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        await using SqliteCommand command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             INSERT INTO index_jobs (
@@ -51,21 +72,16 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
             DO UPDATE SET priority = MAX(index_jobs.priority, excluded.priority)
             RETURNING id;
             """;
-        command.Parameters.AddWithValue("$root_id", request.RootId);
-        command.Parameters.AddWithValue("$file_id", (object?)request.FileId ?? DBNull.Value);
-        command.Parameters.AddWithValue("$job_type", request.JobType.ToString().ToLowerInvariant());
-        command.Parameters.AddWithValue("$dedupe_key", request.DedupeKey);
+        AddRequestParameters(command, request, createdAt);
         command.Parameters.AddWithValue("$priority", request.Priority);
-        command.Parameters.AddWithValue("$created_at", createdAt);
         command.Parameters.AddWithValue("$next_attempt_at", nextAttemptAt);
-        command.Parameters.AddWithValue("$file_revision", (object?)request.ExpectedFileRevision ?? DBNull.Value);
-        command.Parameters.AddWithValue("$policy_revision", request.ExpectedPolicyRevision);
         object? value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         if (value is null)
         {
             throw new InvalidOperationException("The root or file is unavailable or its revision has changed.");
         }
 
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return Convert.ToInt64(value, CultureInfo.InvariantCulture);
     }
 
@@ -260,7 +276,7 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
               AND EXISTS (
                   SELECT 1 FROM index_roots AS r
                   WHERE r.id = index_jobs.root_id AND r.enabled = 1
-                    AND r.status IN ('pending', 'scanning', 'ready')
+                    AND r.status IN ('pending', 'scanning', 'ready', 'paused')
                     AND r.policy_revision = index_jobs.expected_policy_revision
                     AND (
                         index_jobs.file_id IS NULL
@@ -305,7 +321,7 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
               AND NOT EXISTS (
                   SELECT 1 FROM index_roots AS r
                   WHERE r.id = index_jobs.root_id AND r.enabled = 1
-                    AND r.status IN ('pending', 'scanning', 'ready')
+                    AND r.status IN ('pending', 'scanning', 'ready', 'paused')
                     AND r.policy_revision = index_jobs.expected_policy_revision
                     AND (
                         index_jobs.file_id IS NULL
@@ -320,6 +336,17 @@ public sealed class SqliteIndexJobRepository : IIndexJobRepository
             """;
         command.Parameters.AddWithValue("$now", timestamp);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddRequestParameters(SqliteCommand command, IndexJobRequest request, string createdAt)
+    {
+        command.Parameters.AddWithValue("$root_id", request.RootId);
+        command.Parameters.AddWithValue("$file_id", (object?)request.FileId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$job_type", request.JobType.ToString().ToLowerInvariant());
+        command.Parameters.AddWithValue("$dedupe_key", request.DedupeKey);
+        command.Parameters.AddWithValue("$created_at", createdAt);
+        command.Parameters.AddWithValue("$file_revision", (object?)request.ExpectedFileRevision ?? DBNull.Value);
+        command.Parameters.AddWithValue("$policy_revision", request.ExpectedPolicyRevision);
     }
 
     private static IndexJob ReadJob(SqliteDataReader reader)

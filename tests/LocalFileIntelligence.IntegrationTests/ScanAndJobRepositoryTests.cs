@@ -59,6 +59,21 @@ public sealed class ScanAndJobRepositoryTests
     }
 
     [Fact]
+    public async Task SuccessfulCompletionIsRejectedWhileDiscoveredFilesRemainUnprocessed()
+    {
+        await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
+        SqliteScanRunRepository scans = new(fixture.Factory);
+        ScanRun scan = await scans.StartAsync(1, ScanType.Manual, StartTime);
+        await scans.RecordProgressAsync(scan.Id, new ScanProgress(2, 1, 0, "one.txt"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => scans.FinishAsync(scan.Id, ScanStatus.Completed, StartTime.AddMinutes(1)));
+
+        Assert.Equal("running", await fixture.ScalarTextAsync("SELECT status FROM scan_runs WHERE id = $id;", scan.Id));
+        Assert.Equal(0, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
+    }
+
+    [Fact]
     public async Task ScanCannotStartWhenRootIsDisabledOrAlreadyHasAnActiveRun()
     {
         await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
@@ -238,10 +253,71 @@ public sealed class ScanAndJobRepositoryTests
             await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", staleFileJob));
     }
 
-    private static IndexJobRequest JobRequest(string dedupeKey, int priority)
+    [Fact]
+    public async Task EnqueueReplacesStaleActiveWorkAndInvalidatesItsLease()
+    {
+        await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
+        SqliteIndexJobRepository jobs = new(fixture.Factory);
+        long staleQueuedId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 1));
+        await fixture.ExecuteAsync("UPDATE file_entries SET revision = 2 WHERE id = 1;");
+
+        long currentId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 2));
+
+        Assert.NotEqual(staleQueuedId, currentId);
+        Assert.Equal("cancelled",
+            await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", staleQueuedId));
+        IndexJob? running = await jobs.ClaimNextAsync("worker-a", StartTime, TimeSpan.FromMinutes(1));
+        Assert.NotNull(running);
+        Assert.Equal(currentId, running.Id);
+        Assert.Equal(2, running.ExpectedFileRevision);
+
+        await fixture.ExecuteAsync("UPDATE file_entries SET revision = 3 WHERE id = 1;");
+        long replacementId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 3));
+
+        Assert.NotEqual(currentId, replacementId);
+        Assert.Equal(0, await fixture.ScalarAsync(
+            "SELECT count(*) FROM index_jobs WHERE id = $id AND (status <> 'cancelled' OR lease_owner IS NOT NULL);",
+            currentId));
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => jobs.CompleteAsync(currentId, "worker-a", running.Attempts, StartTime.AddSeconds(10)));
+        IndexJob? replacement = await jobs.ClaimNextAsync("worker-b", StartTime.AddSeconds(10), TimeSpan.FromMinutes(1));
+        Assert.NotNull(replacement);
+        Assert.Equal(replacementId, replacement.Id);
+        Assert.Equal(3, replacement.ExpectedFileRevision);
+    }
+
+    [Fact]
+    public async Task PausedRootsRetainQueuedAndRecoveredWorkButAreNotClaimed()
+    {
+        await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
+        SqliteIndexJobRepository jobs = new(fixture.Factory);
+        long expiringId = await jobs.EnqueueAsync(JobRequest("expiring", 90, rootId: 2));
+        IndexJob? expiring = await jobs.ClaimNextAsync("worker", StartTime, TimeSpan.FromMinutes(1));
+        Assert.NotNull(expiring);
+        Assert.Equal(expiringId, expiring.Id);
+        long queuedId = await jobs.EnqueueAsync(JobRequest("queued", 80, rootId: 2));
+        long activeRootJobId = await jobs.EnqueueAsync(JobRequest("active-root", 10));
+        await fixture.ExecuteAsync("UPDATE index_roots SET status = 'paused' WHERE id = 2;");
+
+        IndexJob? claimed = await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1));
+
+        Assert.NotNull(claimed);
+        Assert.Equal(activeRootJobId, claimed.Id);
+        Assert.Equal("queued", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", expiringId));
+        Assert.Equal("queued", await fixture.ScalarTextAsync("SELECT status FROM index_jobs WHERE id = $id;", queuedId));
+        Assert.Null(await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1)));
+
+        await fixture.ExecuteAsync("UPDATE index_roots SET status = 'ready' WHERE id = 2;");
+        IndexJob? resumed = await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(2), TimeSpan.FromMinutes(1));
+        Assert.NotNull(resumed);
+        Assert.Equal(expiringId, resumed.Id);
+        Assert.Equal(2, resumed.Attempts);
+    }
+
+    private static IndexJobRequest JobRequest(string dedupeKey, int priority, long rootId = 1)
     {
         return new IndexJobRequest(
-            1,
+            rootId,
             null,
             IndexJobType.Reconcile,
             dedupeKey,
@@ -249,6 +325,20 @@ public sealed class ScanAndJobRepositoryTests
             StartTime,
             StartTime,
             null,
+            1);
+    }
+
+    private static IndexJobRequest FileJobRequest(long fileRevision)
+    {
+        return new IndexJobRequest(
+            1,
+            1,
+            IndexJobType.Extract,
+            "extract-file-1",
+            50,
+            StartTime,
+            StartTime,
+            fileRevision,
             1);
     }
 
@@ -266,7 +356,9 @@ public sealed class ScanAndJobRepositoryTests
 
         public static async Task<DatabaseFixture> CreateAsync()
         {
-            string directory = Directory.CreateTempSubdirectory("lfi-scan-jobs-").FullName;
+            string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string directory = Path.Combine(localData, $"lfi-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
             SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory);
             DatabaseFixture fixture = new(directory, factory);
             try
