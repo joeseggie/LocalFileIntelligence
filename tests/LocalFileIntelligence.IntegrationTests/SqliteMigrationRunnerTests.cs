@@ -25,12 +25,12 @@ public sealed class SqliteMigrationRunnerTests
         await ExecuteAsync(
             snapshot,
             File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "schema.sql")));
-        Assert.Equal(2, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal(3, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
         Assert.Equal(await GetObjectNamesAsync(snapshot), await GetObjectNamesAsync(lease.Connection));
     }
 
     [Fact]
-    public async Task UpgradesInitialSchemaWithDirectoryPagingIndex()
+    public async Task UpgradeAddsDirectoryPagingAndPurgesPreviouslyOfflineContent()
     {
         using TemporaryDirectory directory = new();
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
@@ -42,10 +42,26 @@ public sealed class SqliteMigrationRunnerTests
             factory,
             [Migration(1, "initial_schema", await migrationReader.ReadToEndAsync())]);
 
+        await using (SqliteConnectionLease writer = await factory.OpenWriterAsync())
+        {
+            await SeedIndexedFileAsync(writer.Connection, 1);
+            await SeedIndexedFileAsync(writer.Connection, 2);
+            await ExecuteAsync(writer.Connection,
+                """
+                INSERT INTO file_contents VALUES
+                    (1, 1, 'former', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 6),
+                    (2, 1, 'current', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 7);
+                UPDATE index_roots SET status = 'offline' WHERE id = 1;
+                """);
+        }
+
         await SqliteMigrationRunner.ApplyAsync(factory);
 
         await using SqliteConnectionLease lease = await factory.OpenReaderAsync();
-        Assert.Equal(2, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal(3, await ScalarAsync<long>(lease.Connection, "SELECT count(*) FROM schema_migrations;"));
+        Assert.Equal(0, await FtsMatchesAsync(lease.Connection, "former"));
+        Assert.Equal(1, await FtsMatchesAsync(lease.Connection, "current"));
+        Assert.Equal("pending", await ScalarAsync<string>(lease.Connection, "SELECT extraction_status FROM file_entries WHERE id = 1;"));
         Assert.Equal(
             1,
             await ScalarAsync<long>(
@@ -65,26 +81,17 @@ public sealed class SqliteMigrationRunnerTests
         using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
         await SqliteMigrationRunner.ApplyAsync(factory);
         await using SqliteConnectionLease writer = await factory.OpenWriterAsync();
+        await SeedIndexedFileAsync(writer.Connection, 1);
         await ExecuteAsync(
             writer.Connection,
             """
-            INSERT INTO index_roots (id, path, path_key, display_name, enabled, status, volume_identity,
-                                     directory_identity, created_at, updated_at)
-            VALUES (1, 'C:\Synthetic', 'C:\SYNTHETIC', 'Synthetic root', 1, 'ready', 'volume-1', 'directory-1',
-                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-            INSERT INTO file_entries (id, root_id, relative_path, path_key, parent_path_key, name, extension,
-                                      entry_type, size_bytes, created_at_fs, modified_at_fs, last_seen_at,
-                                      extraction_status, indexing_status)
-            VALUES (1, 1, 'notes.txt', 'NOTES.TXT', '', 'notes.txt', '.txt', 'file', 17,
-                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
-                    'extracted', 'indexed');
             INSERT INTO file_contents
-            VALUES (1, 1, 'hello local world', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 17);
+            VALUES (1, 1, 'café', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 4);
             """);
 
-        Assert.Equal(1, await FtsMatchesAsync(writer.Connection, "hello"));
-        await ExecuteAsync(writer.Connection, "UPDATE file_contents SET extracted_text = 'updated local world';");
-        Assert.Equal(0, await FtsMatchesAsync(writer.Connection, "hello"));
+        Assert.Equal(1, await FtsMatchesAsync(writer.Connection, "cafe"));
+        await ExecuteAsync(writer.Connection, "UPDATE file_contents SET extracted_text = 'updated', content_length = 7;");
+        Assert.Equal(0, await FtsMatchesAsync(writer.Connection, "cafe"));
         Assert.Equal(1, await FtsMatchesAsync(writer.Connection, "updated"));
 
         SqliteException constraint = await Assert.ThrowsAsync<SqliteException>(
@@ -102,6 +109,32 @@ public sealed class SqliteMigrationRunnerTests
 
         await ExecuteAsync(writer.Connection, "DELETE FROM index_roots WHERE id = 1;");
         Assert.Equal(0, await FtsMatchesAsync(writer.Connection, "updated"));
+    }
+
+    [Theory]
+    [InlineData(false, "ready")]
+    [InlineData(true, "access_denied")]
+    [InlineData(true, "offline")]
+    public async Task ContentUpdateCannotMoveAMatchToAnIneligibleRoot(bool enabled, string status)
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await SqliteConnectionFactory.CreateAsync(directory.Path);
+        await SqliteMigrationRunner.ApplyAsync(factory);
+        await using SqliteConnectionLease writer = await factory.OpenWriterAsync();
+        SqliteConnection connection = writer.Connection;
+        await SeedIndexedFileAsync(connection, 1);
+        await SeedIndexedFileAsync(connection, 2, enabled, status);
+        await ExecuteAsync(connection,
+            "INSERT INTO file_contents VALUES (1, 1, 'hello', 'plain-text', '1', '2026-01-01T00:00:00.000Z', 5);");
+
+        SqliteException rejected = await Assert.ThrowsAsync<SqliteException>(
+            () => ExecuteAsync(connection, "UPDATE file_contents SET file_id = 2 WHERE file_id = 1;"));
+
+        Assert.Equal(1811, rejected.SqliteExtendedErrorCode); // SQLITE_CONSTRAINT_TRIGGER
+        Assert.Equal(1, await ScalarAsync<long>(connection, "SELECT file_id FROM file_contents;"));
+        Assert.Equal(1, await FtsMatchesAsync(connection, "hello"));
+        Assert.Equal(1, await ScalarAsync<long>(connection,
+            "SELECT rowid FROM file_contents_fts WHERE file_contents_fts MATCH 'hello';"));
     }
 
     [Fact]
@@ -125,6 +158,18 @@ public sealed class SqliteMigrationRunnerTests
 
         Assert.Equal(
             "5ed09902d71c9fc6a43b602af539124829a597a94536fde9f7cb6d05dde9b378",
+            Convert.ToHexStringLower(SHA256.HashData(migration)));
+    }
+
+    [Fact]
+    public void OfflineContentMigrationChecksumIsImmutable()
+    {
+        const string resourceName = "LocalFileIntelligence.Storage.Migrations.0003_offline_content_invalidation.sql";
+        using Stream migration = typeof(SqliteMigrationRunner).Assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded migration resource '{resourceName}' was not found.");
+
+        Assert.Equal(
+            "fb5f0ea2b3bb035ba314bf610c5b167448fc4f5223c32443d054ef2b9f4e80a0",
             Convert.ToHexStringLower(SHA256.HashData(migration)));
     }
 
@@ -596,6 +641,28 @@ public sealed class SqliteMigrationRunnerTests
         command.CommandText = "SELECT count(*) FROM file_contents_fts WHERE file_contents_fts MATCH $term;";
         command.Parameters.AddWithValue("$term", term);
         return Convert.ToInt64(await command.ExecuteScalarAsync());
+    }
+
+    private static async Task SeedIndexedFileAsync(SqliteConnection connection, int id, bool enabled = true, string status = "ready")
+    {
+        await using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO index_roots (id, path, path_key, display_name, enabled, status, volume_identity,
+                                     directory_identity, created_at, updated_at)
+            VALUES ($id, 'C:\Synthetic' || $id, 'C:\SYNTHETIC' || $id, 'Synthetic root', $enabled, $status,
+                    'volume-1', 'directory-' || $id, $time, $time);
+            INSERT INTO file_entries (id, root_id, relative_path, path_key, parent_path_key, name, extension,
+                                      entry_type, size_bytes, created_at_fs, modified_at_fs, last_seen_at,
+                                      extraction_status, indexing_status)
+            VALUES ($id, $id, 'notes.txt', 'NOTES.TXT', '', 'notes.txt', '.txt', 'file', 17,
+                    $time, $time, $time, 'extracted', 'indexed');
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$enabled", enabled);
+        command.Parameters.AddWithValue("$status", status);
+        command.Parameters.AddWithValue("$time", "2026-01-01T00:00:00.000Z");
+        await command.ExecuteNonQueryAsync();
     }
 
     private static async Task ExecuteAsync(SqliteConnection connection, string sql)
