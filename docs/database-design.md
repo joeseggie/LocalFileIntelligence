@@ -1,8 +1,11 @@
 # Database design
 
-Status: proposed initial-release schema, executable as a Phase 0 design test.
-`database/schema.sql` is normative. Phase 1 implements the actual connection factory,
-checksummed SQL migrations, repositories, and on-disk recovery tests.
+Status: initial-release schema and persistence baseline. `database/schema.sql` is
+normative and is checked against the embedded migration. LFI-010 through LFI-013
+implement the connection factory, checksummed SQL migration runner, root repository,
+and root-scoped file-entry repository. LFI-014 adds scan-run and index-job repositories,
+tested against this snapshot. The repositories are not wired into service startup;
+file-path validation is lexical and does not authorize or verify filesystem access.
 
 ## Data dictionary
 
@@ -53,6 +56,19 @@ directories. SQLite's ASCII NOCASE is not sufficient for Unicode Windows paths.
 Entries are unique by `(root_id, path_key)`; hard links remain distinct path entries.
 Directory sizes are zero and SHA-256 is null.
 
+The file-entry repository canonicalizes relative path separators and derives the
+case-insensitive key, parent key, name, and extension. It scopes lookups and mutations
+by root ID. Upserts preserve IDs for an existing root/path pair; explicit rename
+preserves the source ID within one root. Meaningful metadata changes advance the file
+and root index revisions, clear cached hashes, reset processing state, and invalidate
+revision-bound content transactionally. Repeated unchanged observations update
+last-seen metadata and the root index revision without invalidating content. Tombstones
+remain addressable by root/path for idempotent resurrection, while directory-child
+queries omit them and use bounded keyset paging through an index on
+`(root_id, parent_path_key, is_deleted, path_key)`. Renames of directories with live
+descendants are rejected until descendant paths can be updated atomically; tombstoned
+descendants do not block a rename and stay addressable at their original paths.
+
 content_length counts UTF-16 units, not bytes. SHA-256 is lowercase 64-character hex
 and is tied to the verified file revision. Invalidated metadata clears/recomputes its
 digest in the repository transaction before duplicate reporting.
@@ -74,21 +90,31 @@ and database handles to prevent replacement while it is in use. It cannot detect
 arbitrary unregistered sync software; service enrollment must add a trusted per-owner
 location policy before claiming that such locations are excluded.
 
-Migrations are ordered, immutable, and SHA-256 checksummed. Obtain the exclusive
-migration lease, back up through SQLite's backup API, and apply each migration plus its
-ledger row transactionally. Refuse gaps, checksum mismatch, and unsupported newer
-versions. Never reset a database to hide failure.
+Migrations are ordered, immutable, and SHA-256 checksummed over their UTF-8 SQL.
+`schema_migrations` is owned by the runner. It takes the serialized writer lease, makes
+a same-directory SQLite backup before upgrading a database with an applied version, and
+applies pending migration SQL and ledger rows in a transaction. Backup failure,
+version gaps, checksum mismatch, unknown schema objects, corruption, and unsupported
+newer versions fail without resetting the database. Backups are retained; cleanup and
+retention policy are not implemented.
 
-The snapshot is not run at every application startup. Phase 1 splits it into ordered
-migrations and validates fresh/repeat/upgrade/rollback/concurrent-open/crash-reopen
-scenarios on actual temporary files. In-memory design tests do not prove WAL or
-production migrations.
+The embedded initial migration matches the design snapshot (the runner creates the
+ledger table); integration tests compare their schema objects and exercise fresh/repeat/
+upgrade/rollback/reopen/concurrent-lock cases on actual temporary files. In-memory
+design tests do not prove WAL or production migrations. The runner is not wired into
+service startup.
 
 ## Transaction invariants
 
 **Scan:** persist a new generation/run, stream idempotent batches, and update progress.
-Only complete successful enumeration may mark unseen entries deleted. Access failure,
-depth/resource exhaustion, cancellation, and offline roots produce incomplete runs.
+Only complete successful enumeration may mark unseen entries deleted; those tombstones
+increment the file revision and reset its hash, index timestamp, and processing states.
+Access failure, depth/resource exhaustion, cancellation, and offline roots produce
+incomplete runs. Incomplete or interrupted runs record the root's last error but return
+it to `ready` (or `pending` before any completed scan) so queued work is kept; only failed
+runs mark the root `error`, where only root-level scan/reconcile work stays eligible so
+bounded retries can rescan it. Starting, finishing, and recovering a scan each increment
+the root's index_revision.
 
 **Metadata/hash:** verify actual file identity/size/time and root policy. Increment the
 file revision on change, clear stale SHA-256, and invalidate content in the same
@@ -100,13 +126,15 @@ text, length, and timestamp together. The composite FK rejects mismatched revisi
 Entry invalidation deletes cached content; FTS triggers remove indexed terms.
 
 **Root state:** disabling or losing access hides data immediately, cancels active jobs,
-and removes cached content. Pausing stops work without revoking read consent, but live
-access checks still apply. Removing a root cascades entries/content/scans/jobs/exclusions/
+and removes cached content. Pausing cancels the root's active jobs and rejects new work
+until it resumes, without revoking read consent, but live access checks still apply. Removing a root cascades entries/content/scans/jobs/exclusions/
 grants/pending requests. Logical purging is not physical secure erase.
 
 **Jobs:** active work is unique by root/type/dedupe key. File-specific jobs cannot name
 a file belonging to another root. Only running jobs hold a lease; claims and lease
-recovery are atomic. Retries are bounded and stale/policy-revoked work is discarded.
+recovery are atomic. Retries are bounded and stale/policy-revoked work is discarded,
+including when it finishes: completion rechecks the root policy and file revision and
+cancels stale work instead of recording success.
 
 **Scoped revisions:** increment each affected index_roots.index_revision in the same
 transaction as query-visible changes. API indexRevision is the sum for the requested,

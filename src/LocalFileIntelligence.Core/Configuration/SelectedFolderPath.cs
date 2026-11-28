@@ -1,6 +1,9 @@
+using System.Buffers;
+using System.Text;
+
 namespace LocalFileIntelligence.Core.Configuration;
 
-internal static class SelectedFolderPath
+public static class SelectedFolderPath
 {
     private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -12,6 +15,17 @@ internal static class SelectedFolderPath
         if (string.IsNullOrWhiteSpace(path) || path.Length > 32767)
         {
             throw new FormatException("A folder path must contain 1-32767 characters.");
+        }
+
+        ReadOnlySpan<char> remaining = path.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out _, out int charactersConsumed) != OperationStatus.Done)
+            {
+                throw new FormatException("A folder path must contain valid Unicode.");
+            }
+
+            remaining = remaining[charactersConsumed..];
         }
 
         if (path.Length < 4 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\')
@@ -34,6 +48,11 @@ internal static class SelectedFolderPath
         }
 
         return char.ToUpperInvariant(normalized[0]) + normalized[1..];
+    }
+
+    public static string NormalizeKey(string path)
+    {
+        return Normalize(path).ToUpperInvariant();
     }
 
     public static bool Overlaps(string first, string second)

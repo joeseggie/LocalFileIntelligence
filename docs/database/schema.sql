@@ -1,4 +1,4 @@
--- Initial-release design snapshot. Phase 1 implements the migration engine separately.
+-- Current schema snapshot after applying the immutable Phase 1 migrations.
 PRAGMA foreign_keys = ON;
 BEGIN IMMEDIATE;
 
@@ -57,7 +57,7 @@ CREATE TABLE file_entries (
     CHECK (entry_type = 'file' OR (size_bytes = 0 AND sha256 IS NULL))
 ) STRICT;
 
-CREATE INDEX entries_by_parent ON file_entries(root_id, parent_path_key, is_deleted, entry_type, name);
+CREATE INDEX entries_by_parent_path_key ON file_entries(root_id, parent_path_key, is_deleted, path_key);
 CREATE INDEX entries_by_generation ON file_entries(root_id, last_seen_generation);
 CREATE INDEX entries_by_extension ON file_entries(root_id, extension, is_deleted);
 CREATE INDEX entries_by_hash ON file_entries(sha256, size_bytes)
@@ -76,6 +76,19 @@ CREATE TABLE file_contents (
 
 CREATE TRIGGER content_requires_current_file
 BEFORE INSERT ON file_contents
+WHEN NOT EXISTS (
+    SELECT 1 FROM file_entries f JOIN index_roots r ON r.id = f.root_id
+    WHERE f.id = NEW.file_id AND f.revision = NEW.file_revision
+      AND f.entry_type = 'file' AND f.is_deleted = 0
+      AND f.indexing_status = 'indexed' AND f.extraction_status = 'extracted'
+      AND r.enabled = 1 AND r.status NOT IN ('offline', 'access_denied')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'content requires a current authorized file revision');
+END;
+
+CREATE TRIGGER content_update_requires_current_file
+BEFORE UPDATE ON file_contents
 WHEN NOT EXISTS (
     SELECT 1 FROM file_entries f JOIN index_roots r ON r.id = f.root_id
     WHERE f.id = NEW.file_id AND f.revision = NEW.file_revision

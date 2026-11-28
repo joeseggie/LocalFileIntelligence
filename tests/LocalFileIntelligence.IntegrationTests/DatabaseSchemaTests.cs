@@ -63,6 +63,35 @@ public sealed class DatabaseSchemaTests
     }
 
     [Fact]
+    public void ContentUpdatesMustTargetACurrentEligibleFile()
+    {
+        using SqliteConnection connection = CreateSeededDatabase();
+        Execute(connection,
+            """
+            INSERT INTO file_entries (id, root_id, relative_path, path_key, parent_path_key, name, extension,
+                                      entry_type, size_bytes, created_at_fs, modified_at_fs, last_seen_at,
+                                      extraction_status, indexing_status)
+            VALUES
+                (2, 1, 'folder', 'FOLDER', '', 'folder', '', 'directory', 0,
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                 'pending', 'pending'),
+                (3, 1, 'pending.txt', 'PENDING.TXT', '', 'pending.txt', '.txt', 'file', 0,
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                 'pending', 'pending');
+            """);
+
+        foreach (int targetFileId in new[] { 2, 3 })
+        {
+            SqliteException exception = Assert.Throws<SqliteException>(() => Execute(connection,
+                $"UPDATE file_contents SET file_id = {targetFileId}, file_revision = 1 WHERE file_id = 1;"));
+
+            Assert.Equal(19, exception.SqliteErrorCode);
+            Assert.Equal(1, Scalar(connection, "SELECT count(*) FROM file_contents WHERE file_id = 1;"));
+            Assert.Equal(1, Matches(connection, "hello"));
+        }
+    }
+
+    [Fact]
     public void PreventsCrossRootFileJobs()
     {
         using SqliteConnection connection = CreateSeededDatabase();
