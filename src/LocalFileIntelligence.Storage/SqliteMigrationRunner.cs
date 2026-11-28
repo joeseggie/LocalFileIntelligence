@@ -139,6 +139,7 @@ public static class SqliteMigrationRunner
         [
             LoadMigration(1, "initial_schema"),
             LoadMigration(2, "directory_paging"),
+            LoadMigration(3, "offline_content_invalidation"),
         ];
     }
 

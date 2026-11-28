@@ -29,6 +29,8 @@ public sealed class DatabaseSchemaTests
     [InlineData("UPDATE index_roots SET status = 'access_denied' WHERE id = 1;")]
     [InlineData("UPDATE index_roots SET status = 'offline' WHERE id = 1;")]
     [InlineData("UPDATE index_roots SET enabled = 0 WHERE id = 1;")]
+    [InlineData("DELETE FROM file_entries WHERE id = 1;")]
+    [InlineData("DELETE FROM file_contents WHERE file_id = 1;")]
     public void RevisionOrAccessChangeInvalidatesCachedContent(string change)
     {
         using SqliteConnection connection = CreateSeededDatabase();

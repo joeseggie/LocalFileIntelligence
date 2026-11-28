@@ -200,12 +200,7 @@ public sealed class SqliteIndexRootRepository : IIndexRootRepository
         update.Parameters.AddWithValue("$id", id);
         await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        if (status == IndexRootStatus.Offline)
-        {
-            await InvalidateRootDataAsync(connection, transaction, id, timestamp, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        else if (status == IndexRootStatus.Paused)
+        if (status == IndexRootStatus.Paused)
         {
             await using SqliteCommand cancelJobs = connection.CreateCommand();
             cancelJobs.Transaction = transaction;
@@ -265,33 +260,6 @@ public sealed class SqliteIndexRootRepository : IIndexRootRepository
         command.Parameters.AddWithValue("$path_key", pathKey);
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRoot(reader) : null;
-    }
-
-    private static async Task InvalidateRootDataAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        long rootId,
-        string updatedAt,
-        CancellationToken cancellationToken)
-    {
-        await using SqliteCommand invalidate = connection.CreateCommand();
-        invalidate.Transaction = transaction;
-        invalidate.CommandText =
-            """
-            DELETE FROM file_contents
-            WHERE file_id IN (SELECT id FROM file_entries WHERE root_id = $root_id);
-
-            UPDATE file_entries
-            SET extraction_status = 'pending'
-            WHERE root_id = $root_id AND extraction_status = 'extracted';
-
-            UPDATE index_jobs
-            SET status = 'cancelled', completed_at = $updated_at, lease_owner = NULL, lease_until = NULL
-            WHERE root_id = $root_id AND status IN ('queued', 'running');
-            """;
-        invalidate.Parameters.AddWithValue("$root_id", rootId);
-        invalidate.Parameters.AddWithValue("$updated_at", updatedAt);
-        await invalidate.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static IndexRoot ReadRoot(SqliteDataReader reader)

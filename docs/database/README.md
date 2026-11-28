@@ -5,7 +5,7 @@ in-memory SQLite; it does not create a production index or implement migrations.
 See [database-design.md](../database-design.md) for the data dictionary, invariants,
 transaction rules, and future schema boundaries.
 
-The LFI-015 SQL migration in `src/LocalFileIntelligence.Storage/Migrations` defines
-file-content storage, external-content FTS5, and revision/access invalidation triggers.
-It assumes the root and file-entry tables already exist; the LFI-011 migration runner
-is still required before production databases can apply it.
+Storage migration `0001_initial_schema.sql` defines file contents, external-content
+FTS5, and the eligibility guards on **both insert and update**. Migration
+`0003_offline_content_invalidation.sql` extends root invalidation to offline roots
+and purges their existing cached content on upgrade. Neither migration starts indexing.
