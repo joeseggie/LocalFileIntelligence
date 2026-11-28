@@ -219,6 +219,7 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
             SET status = CASE $status
                     WHEN 'completed' THEN 'ready'
                     WHEN 'cancelled' THEN 'pending'
+                    WHEN 'incomplete' THEN CASE WHEN last_scan_at IS NULL THEN 'pending' ELSE 'ready' END
                     ELSE 'error'
                 END,
                 updated_at = $completed_at,
@@ -271,7 +272,8 @@ public sealed class SqliteScanRunRepository : IScanRunRepository
             rootCommand.CommandText =
                 """
                 UPDATE index_roots
-                SET status = 'error', updated_at = $recovered_at, last_error = 'interrupted'
+                SET status = CASE WHEN last_scan_at IS NULL THEN 'pending' ELSE 'ready' END,
+                    updated_at = $recovered_at, last_error = 'interrupted'
                 WHERE id = $root_id AND enabled = 1 AND status = 'scanning';
                 """;
             rootCommand.Parameters.AddWithValue("$recovered_at", timestamp);

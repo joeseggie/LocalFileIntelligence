@@ -9,18 +9,24 @@ public sealed class ScanAndJobRepositoryTests
     private static readonly DateTimeOffset StartTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task IncompleteScanDoesNotTombstoneUnseenEntries()
+    public async Task IncompleteScanDoesNotTombstoneUnseenEntriesOrDiscardQueuedWork()
     {
         await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
         SqliteScanRunRepository scans = new(fixture.Factory);
+        SqliteIndexJobRepository jobs = new(fixture.Factory);
 
         ScanRun scan = await scans.StartAsync(1, ScanType.Initial, StartTime);
+        long jobId = await jobs.EnqueueAsync(FileJobRequest(fileRevision: 1));
         await scans.RecordProgressAsync(scan.Id, new ScanProgress(2, 1, 1, "folder\\item.txt"));
         await scans.FinishAsync(scan.Id, ScanStatus.Incomplete, StartTime.AddMinutes(1), "access denied");
 
         Assert.Equal(0, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
-        Assert.Equal("error", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
+        Assert.Equal("pending", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
+        Assert.Equal("access denied", await fixture.ScalarTextAsync("SELECT last_error FROM index_roots WHERE id = 1;"));
         Assert.Equal("incomplete", await fixture.ScalarTextAsync("SELECT status FROM scan_runs WHERE id = $id;", scan.Id));
+        IndexJob? job = await jobs.ClaimNextAsync("worker", StartTime.AddMinutes(1), TimeSpan.FromMinutes(1));
+        Assert.NotNull(job);
+        Assert.Equal(jobId, job.Id);
     }
 
     [Fact]
@@ -94,11 +100,14 @@ public sealed class ScanAndJobRepositoryTests
     {
         await using DatabaseFixture fixture = await DatabaseFixture.CreateAsync();
         SqliteScanRunRepository scans = new(fixture.Factory);
+        await fixture.ExecuteAsync("UPDATE index_roots SET last_scan_at = '2025-12-31T00:00:00.000Z' WHERE id = 1;");
         ScanRun interrupted = await scans.StartAsync(1, ScanType.Initial, StartTime);
 
         Assert.True(await scans.RecoverInterruptedAsync(1, StartTime.AddMinutes(1)));
         Assert.Equal("incomplete",
             await fixture.ScalarTextAsync("SELECT status FROM scan_runs WHERE id = $id;", interrupted.Id));
+        Assert.Equal("ready", await fixture.ScalarTextAsync("SELECT status FROM index_roots WHERE id = 1;"));
+        Assert.Equal("interrupted", await fixture.ScalarTextAsync("SELECT last_error FROM index_roots WHERE id = 1;"));
         Assert.Equal(0, await fixture.ScalarAsync("SELECT is_deleted FROM file_entries WHERE id = 1;"));
         Assert.False(await scans.RecoverInterruptedAsync(1, StartTime.AddMinutes(2)));
 

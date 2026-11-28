@@ -109,6 +109,9 @@ service startup.
 **Scan:** persist a new generation/run, stream idempotent batches, and update progress.
 Only complete successful enumeration may mark unseen entries deleted. Access failure,
 depth/resource exhaustion, cancellation, and offline roots produce incomplete runs.
+Incomplete or interrupted runs record the root's last error but return it to `ready`
+(or `pending` before any completed scan) so queued work is kept; only failed runs mark
+the root `error`.
 
 **Metadata/hash:** verify actual file identity/size/time and root policy. Increment the
 file revision on change, clear stale SHA-256, and invalidate content in the same
