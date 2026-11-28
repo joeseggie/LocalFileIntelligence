@@ -52,6 +52,35 @@ public sealed class SqliteFileEntryRepositoryTests
             await ScalarAsync(factory, "SELECT index_revision FROM index_roots WHERE id = $id;", rootId));
     }
 
+    [Theory]
+    [InlineData(0, 17)]
+    [InlineData(1, 18)]
+    public async Task LowerGenerationObservationDoesNotTombstoneAFileSeenByTheCurrentScan(long generation, long size)
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        long rootId = await AddReadyRootAsync(factory);
+        SqliteFileEntryRepository entries = new(factory);
+        SqliteScanRunRepository scans = new(factory);
+
+        ScanRun first = await scans.StartAsync(rootId, ScanType.Initial, Timestamp);
+        await scans.FinishAsync(first.Id, ScanStatus.Completed, Timestamp.AddMinutes(1));
+        ScanRun current = await scans.StartAsync(rootId, ScanType.Reconciliation, Timestamp.AddMinutes(2));
+        await entries.UpsertAsync(rootId, Observation("seen.txt", generation: current.Generation));
+        FileEntry updated = await entries.UpsertAsync(rootId,
+            Observation("seen.txt", size: size, lastSeenAt: Timestamp.AddMinutes(3), generation: generation));
+        await SetCurrentContentAsync(factory, updated);
+        await scans.RecordProgressAsync(current.Id, new ScanProgress(1, 1, 0, "seen.txt"));
+
+        await scans.FinishAsync(current.Id, ScanStatus.Completed, Timestamp.AddMinutes(4));
+
+        FileEntry seen = Assert.IsType<FileEntry>(await entries.GetByIdAsync(rootId, updated.Id));
+        Assert.False(seen.IsDeleted);
+        Assert.Equal(current.Generation, seen.LastSeenGeneration);
+        Assert.Equal(size, seen.SizeBytes);
+        Assert.Equal(1, await MatchesAsync(factory, "indexed"));
+    }
+
     [Fact]
     public async Task RenameRetainsIdInvalidatesContentAndConflictRollsBack()
     {

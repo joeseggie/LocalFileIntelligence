@@ -288,7 +288,7 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
             || UtcTimestamp.Format(existing.ModifiedAtFs) != observation.ModifiedAtFs
             || !string.Equals(existing.VolumeFileIdentity, observation.VolumeFileIdentity, StringComparison.Ordinal);
         bool seenChanged = UtcTimestamp.Format(existing.LastSeenAt) != observation.LastSeenAt
-            || existing.LastSeenGeneration != observation.LastSeenGeneration;
+            || existing.LastSeenGeneration < observation.LastSeenGeneration;
         if (!changed && !seenChanged)
         {
             return existing;
@@ -302,7 +302,7 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
               SET relative_path = $relative_path, path_key = $path_key, parent_path_key = $parent_path_key,
                   name = $name, extension = $extension, entry_type = $entry_type, size_bytes = $size_bytes,
                   created_at_fs = $created_at_fs, modified_at_fs = $modified_at_fs, last_seen_at = $last_seen_at,
-                  volume_file_identity = $volume_file_identity, last_seen_generation = $last_seen_generation,
+                  volume_file_identity = $volume_file_identity, last_seen_generation = MAX(last_seen_generation, $last_seen_generation),
                   revision = revision + 1, sha256 = NULL, last_indexed_at = NULL,
                   extraction_status = 'pending', indexing_status = 'pending', is_deleted = 0,
                   deleted_at = NULL, last_error = NULL
@@ -310,7 +310,7 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
               """
             : """
               UPDATE file_entries
-              SET last_seen_at = $last_seen_at, last_seen_generation = $last_seen_generation
+              SET last_seen_at = $last_seen_at, last_seen_generation = MAX(last_seen_generation, $last_seen_generation)
               WHERE root_id = $root_id AND id = $id;
               """;
         AddObservationParameters(update, rootId, observation);
