@@ -65,8 +65,9 @@ revision-bound content transactionally. Repeated unchanged observations update
 last-seen metadata and the root index revision without invalidating content. Tombstones
 remain addressable by root/path for idempotent resurrection, while directory-child
 queries omit them and use bounded keyset paging through an index on
-`(root_id, parent_path_key, is_deleted, path_key)`. Populated-directory renames are rejected
-until descendant paths can be updated atomically.
+`(root_id, parent_path_key, is_deleted, path_key)`. Renames of directories with live
+descendants are rejected until descendant paths can be updated atomically; tombstoned
+descendants do not block a rename and stay addressable at their original paths.
 
 content_length counts UTF-16 units, not bytes. SHA-256 is lowercase 64-character hex
 and is tied to the verified file revision. Invalidated metadata clears/recomputes its

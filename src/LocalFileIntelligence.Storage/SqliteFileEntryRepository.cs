@@ -262,6 +262,7 @@ public sealed class SqliteFileEntryRepository : IFileEntryRepository
                 WHERE root_id = $root_id
                   AND path_key >= ($path_key || '\')
                   AND path_key < ($path_key || ']')
+                  AND is_deleted = 0
             );
             """;
         command.Parameters.AddWithValue("$root_id", rootId);

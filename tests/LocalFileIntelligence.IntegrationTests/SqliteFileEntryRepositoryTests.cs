@@ -121,6 +121,31 @@ public sealed class SqliteFileEntryRepositoryTests
     }
 
     [Fact]
+    public async Task RenameAllowsDirectoryWhoseDescendantsAreAllTombstoned()
+    {
+        using TemporaryDirectory directory = new();
+        using SqliteConnectionFactory factory = await CreateMigratedFactoryAsync(directory.Path);
+        long rootId = await AddReadyRootAsync(factory);
+        SqliteFileEntryRepository repository = new(factory);
+        FileEntry folder = await repository.UpsertAsync(rootId, Observation("Project", IndexEntryType.Directory, size: 0));
+        await repository.UpsertAsync(rootId, Observation(@"Project\child.txt"));
+        await repository.TombstoneAsync(rootId, @"Project\child.txt", Timestamp.AddMinutes(1));
+        Assert.Empty(await repository.ListChildrenAsync(rootId, "Project", null, 10));
+
+        FileEntry renamed = Assert.IsType<FileEntry>(
+            await repository.RenameAsync(
+                rootId,
+                "Project",
+                Observation("Renamed", IndexEntryType.Directory, size: 0)));
+
+        Assert.Equal(folder.Id, renamed.Id);
+        Assert.Equal("Renamed", renamed.RelativePath);
+        Assert.Null(await repository.GetByPathAsync(rootId, "Project"));
+        Assert.True(Assert.IsType<FileEntry>(
+            await repository.GetByPathAsync(rootId, @"Project\child.txt")).IsDeleted);
+    }
+
+    [Fact]
     public async Task TombstonesAreIdempotentAndUpsertResurrectsStableEntry()
     {
         using TemporaryDirectory directory = new();
