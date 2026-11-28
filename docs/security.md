@@ -48,6 +48,15 @@ Changing to a broker/impersonation design requires a new ADR and security review
 ## Root consent and revocation
 
 Consent identifies an exact root, its canonical identity, and the current policy.
+The LFI-020 application operation is for a trusted owner caller, not an IPC endpoint.
+It checks the current Windows identity, resolves a fixed local NTFS volume, and opens
+each component relative to its verified parent without backup intent or link following.
+All components (up to 256 below the drive root) must be online, non-reparse and
+case-insensitive. The final handle requires list access and must resolve to the
+selected drive path. Handles remain pinned through the SQLite transaction. New roots
+start disabled at policy revision 1; a repeat cannot silently rebind a replaced root.
+Registration is a point-in-time check, not authorization for a later read or scan.
+
 Selecting a root does not grant an MCP client access to it. Every client/root pair
 gets a separate grant, metadata first; extracted content is an additional opt-in.
 

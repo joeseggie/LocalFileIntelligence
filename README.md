@@ -4,7 +4,7 @@ Local-first Windows file indexing and AI-agent intelligence, targeting **Windows
 .NET 10, WinUI 3, SQLite + FTS5, a Windows Service, and multiple MCP-compatible agents**.
 Only explicitly selected folders are indexed; application processing stays local.
 
-## Current state: Phase 0 complete; LFI-010 through LFI-013 implemented
+## Current state: persistence and explicit root registration
 
 The engineering foundation contains the nine source projects, three test projects,
 central package management, CI, agent instructions, 15 ADRs, an executable initial
@@ -21,8 +21,11 @@ disabled until an explicit state update; it does not verify physical folders or 
 roots. LFI-013 adds root-scoped file-entry upsert, rename, tombstone, and direct-child
 lookup operations over the initial schema. LFI-014 adds Application contracts and
 Storage repositories for scan runs and index jobs, tested against the schema snapshot.
-Path checks are lexical only; they do not authorize or verify filesystem access. These
-repositories are not wired into the service or indexer. No service is installed, no
+LFI-020 adds `RootEnrollment.RegisterAsync` for explicitly selected folders on fixed
+local NTFS. It verifies the opened directory and its ancestors, then persists its
+canonical path and physical identity. New registrations are disabled; configuration
+parsing never registers a folder. Enrollment and the repositories are not wired into
+the service or indexer. No service is installed, no
 personal folders are scanned, and no desktop UI or MCP endpoint is active. Most projects
 establish boundaries only. `WindowsService` currently offers a safe, configuration-only
 command; `McpServer` fails explicitly until Phase 8 is implemented. The Desktop project
@@ -65,7 +68,7 @@ The initial bootstrap establishes `main`. Subsequent work follows **issue -> sma
 plan -> feature branch -> implementation -> tests -> review -> PR -> merge**.
 Do not generate the entire application in one pass.
 
-The next vertical slice is **LFI-014: scan and job persistence**. The first product
+The next crawler slice is **LFI-021: recursive enumeration**. The first product
 milestone is a working local index through the service and desktop, not an AI demo; its
 criteria remain open.
 
@@ -76,8 +79,8 @@ copilot
 
 Suggested prompt:
 
-> Implement LFI-014 only. Read AGENTS.md, the issue, docs/database-design.md, and
-> ADR-004. Inspect the existing projects, propose a small plan, and work on a feature
+> Implement LFI-021 only. Read AGENTS.md, the issue, docs/security.md, and
+> ADR-009. Inspect the existing projects, propose a small plan, and work on a feature
 > branch. Add focused tests and report changed files, validation, and unresolved risks.
 > Do not install the service, index my folders, or implement later issues.
 

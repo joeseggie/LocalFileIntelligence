@@ -147,8 +147,18 @@
           "LocalFileIntelligence.Core": "[1.0.0, )"
         }
       },
+      "localfileintelligence.contracts": {
+        "type": "Project"
+      },
       "localfileintelligence.core": {
         "type": "Project"
+      },
+      "localfileintelligence.infrastructure": {
+        "type": "Project",
+        "dependencies": {
+          "LocalFileIntelligence.Application": "[1.0.0, )",
+          "LocalFileIntelligence.Contracts": "[1.0.0, )"
+        }
       },
       "localfileintelligence.storage": {
         "type": "Project",
